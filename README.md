@@ -9,6 +9,7 @@ A Streamlit-based application to manage and track participation in an AI Adoptio
 - **Events Tracking**: Schedule and manage various event types (workshops, demos, meetings, conferences)
 - **Cohorts Management**: Create and manage cohorts of employees
 - **Participation Tracking**: Record and track employee registration and participation in events
+- **Flexible CSV Import**: Map your own CSV column names to the required fields
 
 ## Project Structure
 
@@ -19,6 +20,7 @@ A Streamlit-based application to manage and track participation in an AI Adoptio
   - `events.csv`: Event instances
   - `cohorts.csv`: Employee cohorts
   - `participants.csv`: Detailed participation records
+  - `csv_mappings.json`: Configuration for custom CSV column mappings
 
 ## Requirements
 
@@ -48,6 +50,7 @@ A Streamlit-based application to manage and track participation in an AI Adoptio
 
 ### Employees Section
 - Upload or manually enter employee details
+- Configure CSV column mappings if your CSV has different column names
 - Tag employees with special categories (Working Group Lead, Train-the-Trainer, etc.)
 - View employee data organized by department
 
@@ -69,6 +72,23 @@ A Streamlit-based application to manage and track participation in an AI Adoptio
 - Upload lists of participants by ID or email
 - Mark employees as registered and/or participated
 - View and edit participation history
+
+## Custom CSV Import
+
+The application supports custom CSV formats for the employees table:
+
+1. Prepare your CSV file with your own column names
+2. Go to the Employees section
+3. Use the "CSV Column Mapping" form to map your columns to the required fields:
+   - Standard ID (required)
+   - Email (required)
+   - Location
+   - Job Title
+   - Department levels (L1-L6)
+   - Manager levels (L1-L6)
+   - Categories
+
+The mappings are saved in `data/csv_mappings.json` and will be remembered between sessions.
 
 ## Data Storage
 

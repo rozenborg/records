@@ -3,22 +3,40 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 import io # Needed for file uploads
+import json
 
 ###############################################################################
 # Configuration
 ###############################################################################
 DATA_DIR = "data"              # Folder where CSV files live (created if needed)
+CONFIG_FILE = os.path.join(DATA_DIR, "csv_mappings.json")
+
+# Default column mappings for each table
+DEFAULT_MAPPINGS = {
+    "employees": {
+        "Standard ID": "Standard ID",
+        "Email": "Email",
+        "Location": "Location",
+        "Job Title": "Job Title",
+        "L1 Department": "L1 Department",
+        "L2 Department": "L2 Department",
+        "L3 Department": "L3 Department",
+        "L4 Department": "L4 Department",
+        "L5 Department": "L5 Department",
+        "L6 Department": "L6 Department",
+        "L1 Manager": "L1 Manager",
+        "L2 Manager": "L2 Manager",
+        "L3 Manager": "L3 Manager",
+        "L4 Manager": "L4 Manager",
+        "L5 Manager": "L5 Manager",
+        "L6 Manager": "L6 Manager",
+        "Categories": "Categories"
+    }
+}
 
 # Each logical table maps to a CSV file and a list of its canonical columns
 FILES = {
-    "employees": ("employees.csv", [
-        "Standard ID", "Email", "Location", "Job Title",
-        "L1 Department", "L2 Department", "L3 Department",
-        "L4 Department", "L5 Department", "L6 Department",
-        "L1 Manager", "L2 Manager", "L3 Manager",
-        "L4 Manager", "L5 Manager", "L6 Manager",
-        "Categories"       # Semi-colon-delimited list of special roles
-    ]),
+    "employees": ("employees.csv", list(DEFAULT_MAPPINGS["employees"].keys())),
     "workshops": ("workshops.csv", [
         "Workshop #", "Series", "Skill", "Goal",
         "Instances",       # Comma-separated Event IDs
@@ -56,9 +74,26 @@ EVENT_CATEGORIES = {
 # Utility helpers
 ###############################################################################
 def ensure_data_dir() -> None:
-    """Make sure the data directory exists."""
-    os.makedirs(DATA_DIR, exist_ok=True)
+    """Create data directory if it doesn't exist."""
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
+    
+    # Initialize CSV mappings if they don't exist
+    if not os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(DEFAULT_MAPPINGS, f, indent=2)
 
+def load_csv_mappings():
+    """Load CSV column mappings from config file."""
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    return DEFAULT_MAPPINGS
+
+def save_csv_mappings(mappings):
+    """Save CSV column mappings to config file."""
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(mappings, f, indent=2)
 
 def _path_for(key: str) -> str:
     """Absolute CSV path for a given logical table key."""
@@ -71,6 +106,7 @@ def load_table(key: str) -> pd.DataFrame:
     """Load the CSV for *key* – if missing, create an empty one first."""
     path = _path_for(key)
     cols = FILES[key][1]
+    mappings = load_csv_mappings()
 
     if os.path.exists(path):
         df = pd.read_csv(
@@ -80,6 +116,22 @@ def load_table(key: str) -> pd.DataFrame:
             low_memory=True,
             engine='c'
         ).fillna("")
+
+        # Handle custom column mappings for employees table
+        if key == "employees":
+            # Get the current mappings
+            current_mappings = mappings.get("employees", {})
+            
+            # Create a mapping from actual CSV columns to canonical columns
+            reverse_mapping = {v: k for k, v in current_mappings.items()}
+            
+            # Rename columns based on mappings
+            df = df.rename(columns=reverse_mapping)
+            
+            # Add any missing canonical columns
+            for col in cols:
+                if col not in df.columns:
+                    df[col] = ""
 
         # Special handling for date columns
         if key == "events" and "Date" in df.columns:
@@ -421,6 +473,48 @@ if table_key == "manage_participation":
 else:
     df = load_table(table_key)
     st.subheader(f"{section_label} Table")
+
+    # Add CSV Mapping Configuration for Employees section
+    if table_key == "employees":
+        st.markdown("### CSV Column Mapping")
+        st.info("Configure how your CSV file's columns map to the application's required fields.")
+        
+        # Load current mappings
+        mappings = load_csv_mappings()
+        current_mappings = mappings.get("employees", {})
+        
+        # Create a form for mapping configuration
+        with st.form("csv_mapping_form"):
+            st.markdown("#### Map Your CSV Columns")
+            st.markdown("Select which column from your CSV file corresponds to each required field.")
+            
+            # Get the actual columns from the CSV if it exists
+            csv_path = _path_for("employees")
+            actual_columns = []
+            if os.path.exists(csv_path):
+                temp_df = pd.read_csv(csv_path, nrows=0)
+                actual_columns = list(temp_df.columns)
+            
+            # Create mapping selectors
+            new_mappings = {}
+            for canonical_col in FILES["employees"][1]:
+                options = actual_columns if actual_columns else [canonical_col]
+                selected = st.selectbox(
+                    f"Map '{canonical_col}' to:",
+                    options=options,
+                    index=options.index(current_mappings.get(canonical_col, canonical_col)) if current_mappings.get(canonical_col) in options else 0,
+                    key=f"mapping_{canonical_col}"
+                )
+                new_mappings[canonical_col] = selected
+            
+            # Submit button
+            submitted = st.form_submit_button("Save Mappings")
+            if submitted:
+                mappings["employees"] = new_mappings
+                save_csv_mappings(mappings)
+                st.success("Column mappings saved! The table will update to reflect the new mappings.")
+                load_table.clear()  # Clear the cache to force reload
+                st.rerun()
 
     # Pagination for large datasets
     df_display = df # Default to full display
