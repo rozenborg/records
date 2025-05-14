@@ -724,29 +724,36 @@ else:
 
     # Standard editor for other sections
     else:
+        # Ensure a version key exists in session state
+        if "workshops_editor_version" not in st.session_state:
+            st.session_state["workshops_editor_version"] = 0
+
+        st.info(
+            "Use **Instances** to store comma-separated Event IDs. "
+            "**Registered/Participated** store comma-separated Standard IDs.\n\n"
+            "Relations are simple CSV references; production apps need a database."
+        )
+
         edited_df_subset = st.data_editor(
             df_display_paginated, 
             num_rows="dynamic", 
-            key=f"editor_{table_key}",
+            key=f"editor_{table_key}_{st.session_state['workshops_editor_version']}",
             use_container_width=True
         )
         if st.button("💾 Save changes", key=f"save_{table_key}"):
             if len(df_for_display) > 1000:
-                # Apply changes from edited_df_subset (which is a view of a page) 
-                # back to the corresponding slice of df_for_display
                 df_for_display.iloc[start_idx:end_idx] = edited_df_subset
             else:
-                # edited_df_subset is the full df_for_display if not paginated
                 df_for_display = edited_df_subset 
 
             # Now update the original df with changes from df_for_display
             for col_to_update in df_for_display.columns:
                 if col_to_update in df.columns:
                     df[col_to_update] = df_for_display[col_to_update]
-            
             save_table(table_key, df) # Save the full df
             st.success("Saved to disk.")
             load_table.clear() # Clear cache after saving
+            st.session_state["workshops_editor_version"] += 1
             st.rerun()
 
 
