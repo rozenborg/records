@@ -85,6 +85,8 @@ def load_table(key: str) -> pd.DataFrame:
         ).fillna("")
 
         if key == "employees":
+            # Force cache clear for employees table
+            load_table.clear()
             # Rename "Work Email Address" to "Email" if it exists
             if "Work Email Address" in df.columns:
                 df = df.rename(columns={"Work Email Address": "Email"})
@@ -365,29 +367,29 @@ if table_key == "manage_participation":
                 st.success("Changes saved successfully!")
                 st.rerun()
 
-        st.markdown("---")
-
-        # Add new participation records
-        st.markdown("### Add New Participation Records")
+        # Move participant management to sidebar
+        st.sidebar.markdown("### Add New Participation Records")
         
         # Event Selection
         event_options = {f"{row['Event ID']} - {row['Name']} ({row['Date'].strftime('%Y-%m-%d')})": row['Event ID']
                          for _, row in events_df.sort_values("Date", ascending=False).iterrows()}
-        selected_event_display = st.selectbox(
+        selected_event_display = st.sidebar.selectbox(
             "Select Event",
             options=list(event_options.keys())
         )
         selected_event_id = event_options.get(selected_event_display)
 
-        st.markdown("---")
+        st.sidebar.markdown("---")
 
         # Input Employee IDs/Emails
-        st.markdown("#### Select Employees")
-        input_method = st.tabs(["Paste List", "Select from List", "Upload File"])
+        st.sidebar.markdown("#### Select Employees")
         employee_ids_to_process = []
         invalid_inputs_detected = []
+        expander_paste = st.sidebar.expander("Paste List", expanded=True)
+        expander_select = st.sidebar.expander("Select from List", expanded=False)
+        expander_upload = st.sidebar.expander("Upload File", expanded=False)
 
-        with input_method[0]: # Paste List
+        with expander_paste:
             pasted_list = st.text_area("Paste Standard IDs or Emails (one per line)", key="participants_paste")
             if pasted_list:
                 employee_ids_to_process, invalid_inputs_detected = get_employee_ids_from_input(pasted_list, employees_df)
@@ -395,7 +397,7 @@ if table_key == "manage_participation":
                 if invalid_inputs_detected:
                     st.warning(f"Could not find/validate: {', '.join(invalid_inputs_detected)}")
 
-        with input_method[1]: # Select from List
+        with expander_select:
             employee_display_options = [f"{row['Standard ID']} - {row['Email']}"
                                         for _, row in employees_df.iterrows()]
             selected_employees = st.multiselect(
@@ -406,7 +408,7 @@ if table_key == "manage_participation":
             if selected_employees:
                 employee_ids_to_process = [opt.split(' - ')[0] for opt in selected_employees]
 
-        with input_method[2]: # Upload File
+        with expander_upload:
             uploaded_file = st.file_uploader("Upload .txt or .csv (one ID/email per line)", type=["txt", "csv"], key="participants_upload")
             if uploaded_file is not None:
                 stringio = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
@@ -416,17 +418,17 @@ if table_key == "manage_participation":
                 if invalid_inputs_detected:
                     st.warning(f"Could not find/validate: {', '.join(invalid_inputs_detected)}")
 
-        st.markdown("---")
+        st.sidebar.markdown("---")
 
         # Select Participation Type
-        st.markdown("#### Set Participation Status")
-        mark_registered = st.checkbox("Registered")
-        mark_participated = st.checkbox("Participated")
+        st.sidebar.markdown("#### Set Participation Status")
+        mark_registered = st.sidebar.checkbox("Registered")
+        mark_participated = st.sidebar.checkbox("Participated")
 
-        st.markdown("---")
+        st.sidebar.markdown("---")
 
         # Update Button
-        if st.button("Update Participation", disabled=(not selected_event_id or not employee_ids_to_process or (not mark_registered and not mark_participated))):
+        if st.sidebar.button("Update Participation", disabled=(not selected_event_id or not employee_ids_to_process or (not mark_registered and not mark_participated))):
             added_reg, added_part = update_event_participation(
                 selected_event_id,
                 employee_ids_to_process,
@@ -440,10 +442,10 @@ if table_key == "manage_participation":
                 success_msgs.append(f"Added {added_part} new participation record(s).")
 
             if success_msgs:
-                st.success(f"Successfully updated event '{selected_event_display}'. {' '.join(success_msgs)}")
+                st.sidebar.success(f"Successfully updated event '{selected_event_display}'. {' '.join(success_msgs)}")
                 st.rerun()
             else:
-                st.info("No changes made (employees might already have the selected status).")
+                st.sidebar.info("No changes made (employees might already have the selected status).")
 
 # --- Other Sections (Employees, Workshops, Cohorts, Events) ---
 else:
