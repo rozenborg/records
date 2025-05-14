@@ -532,20 +532,18 @@ else:
             load_table.clear()
             st.rerun()
 
-        # Form for adding new events
-        st.markdown("### Add New Event")
-        with st.form("new_event_form"):
-            col1, col2 = st.columns(2)
-            with col1:
-                event_name = st.text_input("Event Name")
-                event_date = st.date_input("Event Date")
-                event_category = st.selectbox("Category", options=list(EVENT_CATEGORIES.keys()), help="Select the type of event")
-            with col2:
-                workshop_df_form = load_table("workshops")
-                form_workshop_options = [f"{row['Workshop #']} - {row['Skill']}: {row['Goal']}" for _, row in workshop_df_form.iterrows()]
-                form_workshop_options.insert(0, "")
-                selected_workshop_display = st.selectbox("Workshop (if applicable)", options=form_workshop_options, help="Select the workshop this event is an instance of (if applicable)") if event_category == "Workshop" else ""
-                selected_workshop_id = selected_workshop_display.split(" - ")[0] if selected_workshop_display and " - " in selected_workshop_display else ""
+        # Form for adding new events - MOVED TO SIDEBAR
+        st.sidebar.markdown("### Add New Event")
+        with st.sidebar.form("new_event_form"):
+            event_name = st.text_input("Event Name")
+            event_date = st.date_input("Event Date")
+            event_category = st.selectbox("Category", options=list(EVENT_CATEGORIES.keys()), help="Select the type of event")
+            
+            workshop_df_form = load_table("workshops")
+            form_workshop_options = [f"{row['Workshop #']} - {row['Skill']}: {row['Goal']}" for _, row in workshop_df_form.iterrows()]
+            form_workshop_options.insert(0, "")
+            selected_workshop_display = st.selectbox("Workshop (if applicable)", options=form_workshop_options, help="Select the workshop this event is an instance of (if applicable)") if event_category == "Workshop" else ""
+            selected_workshop_id = selected_workshop_display.split(" - ")[0] if selected_workshop_display and " - " in selected_workshop_display else ""
 
             submitted = st.form_submit_button("Add Event")
             if submitted:
