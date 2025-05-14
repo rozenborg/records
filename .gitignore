@@ -37,6 +37,5 @@ env/
 Thumbs.db
 
 # Application specific
-data/
 data/*.csv
  
