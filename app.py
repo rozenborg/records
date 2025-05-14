@@ -724,36 +724,63 @@ else:
 
     # Standard editor for other sections
     else:
-        # Ensure a version key exists in session state
-        if "workshops_editor_version" not in st.session_state:
-            st.session_state["workshops_editor_version"] = 0
-
-        st.info(
-            "Use **Instances** to store comma-separated Event IDs. "
-            "**Registered/Participated** store comma-separated Standard IDs.\n\n"
-            "Relations are simple CSV references; production apps need a database."
-        )
+        _editor_key = f"editor_{table_key}"
+        if table_key == "workshops":
+            if "workshops_editor_version" not in st.session_state:
+                st.session_state["workshops_editor_version"] = 0
+            _editor_key = f"editor_workshops_{st.session_state['workshops_editor_version']}"
 
         edited_df_subset = st.data_editor(
             df_display_paginated, 
             num_rows="dynamic", 
-            key=f"editor_{table_key}_{st.session_state['workshops_editor_version']}",
+            key=_editor_key,
             use_container_width=True
         )
         if st.button("💾 Save changes", key=f"save_{table_key}"):
-            if len(df_for_display) > 1000:
-                df_for_display.iloc[start_idx:end_idx] = edited_df_subset
-            else:
-                df_for_display = edited_df_subset 
+            # df is the original full DataFrame loaded from load_table()
+            # df_for_display is df[displayed_columns] (original data, subset of columns)
+            # edited_df_subset is the result of st.data_editor on df_display_paginated (a page or full, with displayed_columns and dynamic rows)
 
-            # Now update the original df with changes from df_for_display
-            for col_to_update in df_for_display.columns:
-                if col_to_update in df.columns:
-                    df[col_to_update] = df_for_display[col_to_update]
-            save_table(table_key, df) # Save the full df
+            current_df_with_displayed_columns = None
+            if len(df_for_display) > 1000: # PAGINATED CASE
+                part_before = df_for_display.iloc[:start_idx].reset_index(drop=True)
+                part_after = df_for_display.iloc[end_idx:].reset_index(drop=True)
+                
+                current_df_with_displayed_columns = pd.concat([
+                    part_before, 
+                    edited_df_subset.reset_index(drop=True), # This is the edited page
+                    part_after
+                ], ignore_index=True)
+            else: # NON-PAGINATED CASE
+                # edited_df_subset is the full table (but with only displayed_columns), edited.
+                current_df_with_displayed_columns = edited_df_subset.reset_index(drop=True)
+
+            # Now, current_df_with_displayed_columns has the correct rows and includes only the displayed_columns.
+            # We need to build df_to_save, which will have ALL original columns.
+            df_to_save = current_df_with_displayed_columns.copy()
+
+            for original_col_name in df.columns: # Iterate over all column names from the original full df
+                if original_col_name not in df_to_save.columns: # If this column is not in our current (displayed_columns only) df
+                    # This means it's a non-displayed column. We need to add it.
+                    # Get its values from the original 'df', aligned by the new index of df_to_save.
+                    # Rows in df_to_save that are new (not in original df.index) will get NaN.
+                    if original_col_name in df: # Check if column exists in original df
+                        df_to_save[original_col_name] = df[original_col_name].reindex(df_to_save.index)
+                    else: # Should not happen if df.columns is accurate
+                        df_to_save[original_col_name] = pd.Series(index=df_to_save.index, dtype='object')
+
+
+            # Fill any NaNs that resulted (e.g., for new rows in non-displayed columns, or if original data was NaN)
+            df_to_save = df_to_save.fillna("")
+            
+            # Ensure all original columns are present and in the original order
+            df_to_save = df_to_save.reindex(columns=df.columns, fill_value="")
+
+            save_table(table_key, df_to_save)
             st.success("Saved to disk.")
             load_table.clear() # Clear cache after saving
-            st.session_state["workshops_editor_version"] += 1
+            if table_key == "workshops":
+                st.session_state["workshops_editor_version"] += 1
             st.rerun()
 
 
