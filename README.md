@@ -47,15 +47,11 @@ A Streamlit-based application to manage and track participation in an AI Adoptio
    ```
 
 4. **Prepare your data files**:
-   - Create a `data/` directory in the project root
-   - Copy the contents of `data_template/` to your `data/` directory:
-     ```bash
-     cp -r data_template/* data/
-     ```
-   - Modify the files in `data/` with your actual data:
-     - `employees.csv` must contain columns named `Standard ID` and `Work Email Address`
-     - Other columns in your CSV will be loaded automatically
-     - The application will use these files for all operations
+   - Create a `data/` directory in the project root (the app will create it if it doesn't exist)
+   - Place your `employees.csv` file in the `data/` directory
+   - The `employees.csv` file **must** contain columns named `Standard ID` and `Work Email Address`
+   - Other columns in your CSV will be loaded automatically
+   - The application will create empty files for other required CSVs (`workshops.csv`, `events.csv`, `cohorts.csv`, `participants.csv`) on first run
 
 5. **Run the application**:
    ```
