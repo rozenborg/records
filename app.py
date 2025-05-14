@@ -9,34 +9,21 @@ import json
 # Configuration
 ###############################################################################
 DATA_DIR = "data"              # Folder where CSV files live (created if needed)
-CONFIG_FILE = os.path.join(DATA_DIR, "csv_mappings.json")
+# CONFIG_FILE = os.path.join(DATA_DIR, "csv_mappings.json") # Removed
 
 # Default column mappings for each table
-DEFAULT_MAPPINGS = {
+DEFAULT_MAPPINGS = { # Simplified - only for internal canonical names now
     "employees": {
-        "Standard ID": "Standard ID",
-        "Email": "Email",
-        "Location": "Location",
-        "Job Title": "Job Title",
-        "L1 Department": "L1 Department",
-        "L2 Department": "L2 Department",
-        "L3 Department": "L3 Department",
-        "L4 Department": "L4 Department",
-        "L5 Department": "L5 Department",
-        "L6 Department": "L6 Department",
-        "L1 Manager": "L1 Manager",
-        "L2 Manager": "L2 Manager",
-        "L3 Manager": "L3 Manager",
-        "L4 Manager": "L4 Manager",
-        "L5 Manager": "L5 Manager",
-        "L6 Manager": "L6 Manager",
-        "Categories": "Categories"
+        "Standard ID": "Standard ID", # Assumed to exist in CSV
+        "Email": "Work Email Address", # This is what we expect in CSV for our internal "Email"
+        # Other fields are dynamic
     }
 }
 
 # Each logical table maps to a CSV file and a list of its canonical columns
+# For employees, canonical cols are what we ensure exist + what's dynamically loaded
 FILES = {
-    "employees": ("employees.csv", list(DEFAULT_MAPPINGS["employees"].keys())),
+    "employees": ("employees.csv", ["Standard ID", "Email"]), # Core internal columns
     "workshops": ("workshops.csv", [
         "Workshop #", "Series", "Skill", "Goal",
         "Instances",       # Comma-separated Event IDs
@@ -78,22 +65,22 @@ def ensure_data_dir() -> None:
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
     
-    # Initialize CSV mappings if they don't exist
-    if not os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(DEFAULT_MAPPINGS, f, indent=2)
+    # Initialize CSV mappings if they don't exist # Removed
+    # if not os.path.exists(CONFIG_FILE):
+    #     with open(CONFIG_FILE, 'w') as f:
+    #         json.dump(DEFAULT_MAPPINGS, f, indent=2)
 
-def load_csv_mappings():
-    """Load CSV column mappings from config file."""
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
-    return DEFAULT_MAPPINGS
+# def load_csv_mappings(): # Removed
+#     """Load CSV column mappings from config file."""
+#     if os.path.exists(CONFIG_FILE):
+#         with open(CONFIG_FILE, 'r') as f:
+#             return json.load(f)
+#     return DEFAULT_MAPPINGS
 
-def save_csv_mappings(mappings):
-    """Save CSV column mappings to config file."""
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(mappings, f, indent=2)
+# def save_csv_mappings(mappings): # Removed
+#     """Save CSV column mappings to config file."""
+#     with open(CONFIG_FILE, 'w') as f:
+#         json.dump(mappings, f, indent=2)
 
 def _path_for(key: str) -> str:
     """Absolute CSV path for a given logical table key."""
@@ -105,8 +92,9 @@ def _path_for(key: str) -> str:
 def load_table(key: str) -> pd.DataFrame:
     """Load the CSV for *key* – if missing, create an empty one first."""
     path = _path_for(key)
-    cols = FILES[key][1]
-    mappings = load_csv_mappings()
+    # canonical_cols are the *minimum* internal columns we expect (e.g., "Standard ID", "Email")
+    # plus any other columns found in the CSV for employees.
+    canonical_cols = FILES[key][1][:] # Make a copy
 
     if os.path.exists(path):
         df = pd.read_csv(
@@ -117,55 +105,60 @@ def load_table(key: str) -> pd.DataFrame:
             engine='c'
         ).fillna("")
 
-        # Handle custom column mappings for employees table
         if key == "employees":
-            # Get the current mappings
-            current_mappings = mappings.get("employees", {})
+            # Rename "Work Email Address" to "Email" if it exists
+            if "Work Email Address" in df.columns:
+                df = df.rename(columns={"Work Email Address": "Email"})
             
-            # Create a mapping from actual CSV columns to canonical columns
-            reverse_mapping = {v: k for k, v in current_mappings.items()}
+            # Ensure "Standard ID" and "Email" are present
+            if "Standard ID" not in df.columns:
+                df["Standard ID"] = ""
+            if "Email" not in df.columns:
+                df["Email"] = "" # This would happen if "Work Email Address" wasn't in CSV
             
-            # Rename columns based on mappings
-            df = df.rename(columns=reverse_mapping)
-            
-            # Add any missing canonical columns
-            for col in cols:
-                if col not in df.columns:
-                    df[col] = ""
+            # Dynamically add any other columns from the CSV to our list of columns to display/use
+            # The initial canonical_cols for employees is ["Standard ID", "Email"]
+            for col in df.columns:
+                if col not in canonical_cols:
+                    canonical_cols.append(col)
 
-        # Special handling for date columns
-        if key == "events" and "Date" in df.columns:
-            # Attempt to convert 'Date' to datetime, coercing errors to NaT
+        # Special handling for date columns (for other tables)
+        elif key == "events" and "Date" in df.columns:
             df["Date"] = pd.to_datetime(df["Date"], errors='coerce')
         elif key == "cohorts" and "Date Started" in df.columns:
-            # Convert 'Date Started' to datetime
             df["Date Started"] = pd.to_datetime(df["Date Started"], errors='coerce')
 
-    else:
-        df = pd.DataFrame(columns=cols)
+    else: # File does not exist, create an empty one with canonical columns
+        df = pd.DataFrame(columns=canonical_cols) 
         # If creating a new table, ensure date columns are datetime type
-        if key == "events" and "Date" in cols:
+        if key == "events" and "Date" in canonical_cols:
             df["Date"] = pd.Series(dtype='datetime64[ns]')
-        elif key == "cohorts" and "Date Started" in cols:
+        elif key == "cohorts" and "Date Started" in canonical_cols:
             df["Date Started"] = pd.Series(dtype='datetime64[ns]')
-        df.to_csv(path, index=False)
+        
+        # For a new employees.csv, we need to map internal "Email" back to "Work Email Address"
+        # if we were to save it immediately, but save_table doesn't do reverse mapping yet.
+        # For now, we just save with internal names.
+        df_to_save = df.copy()
+        if key == "employees":
+             # If we were to save with external names, this is where we'd rename "Email" back
+             # df_to_save = df_to_save.rename(columns={"Email": "Work Email Address"})
+             pass # Keep internal names for now
+        df_to_save.to_csv(path, index=False)
 
-    # Ensure all expected columns exist
-    for col in cols:
+    # Ensure all *expected* (canonical + dynamic for employees) columns exist in the DataFrame
+    # For employees, canonical_cols has already been updated with dynamic columns from CSV
+    for col in canonical_cols:
         if col not in df.columns:
-            df[col] = "" # Initialize new string columns
-            if key == "events" and col == "Date" and "Date" not in df.columns:
-                df["Date"] = pd.Series(dtype='datetime64[ns]')
-            elif key == "cohorts" and col == "Date Started" and "Date Started" not in df.columns:
-                df["Date Started"] = pd.Series(dtype='datetime64[ns]')
-
+            df[col] = ""
+    
     # Re-ensure date columns are datetime if they were re-added as string
     if key == "events" and "Date" in df.columns and df["Date"].dtype == object:
         df["Date"] = pd.to_datetime(df["Date"], errors='coerce')
     elif key == "cohorts" and "Date Started" in df.columns and df["Date Started"].dtype == object:
         df["Date Started"] = pd.to_datetime(df["Date Started"], errors='coerce')
 
-    return df[cols]   # Enforce column order
+    return df[canonical_cols]   # Enforce column order, including dynamic ones for employees
 
 
 def save_table(key: str, df: pd.DataFrame) -> None:
@@ -474,58 +467,49 @@ else:
     df = load_table(table_key)
     st.subheader(f"{section_label} Table")
 
-    # Add CSV Mapping Configuration for Employees section
+    # For employees table, allow toggling display of dynamic columns
+    displayed_columns = FILES[table_key][1][:] # Start with core internal columns
+
     if table_key == "employees":
-        st.markdown("### CSV Column Mapping")
-        st.info("Configure how your CSV file's columns map to the application's required fields.")
+        # df already contains all columns from CSV, including dynamic ones.
+        # FILES["employees"][1] is just ["Standard ID", "Email"]
+        # We want to offer selection for columns in df that are NOT these two.
+        all_available_columns = list(df.columns)
+        optional_columns = [col for col in all_available_columns if col not in ["Standard ID", "Email"]]
         
-        # Load current mappings
-        mappings = load_csv_mappings()
-        current_mappings = mappings.get("employees", {})
+        if optional_columns:
+            st.sidebar.markdown("### Display Columns")
+            selected_optional_cols = st.sidebar.multiselect(
+                "Select additional columns to display:",
+                options=optional_columns,
+                default=[] # Initially, only show Standard ID and Email
+            )
+            displayed_columns.extend(selected_optional_cols)
         
-        # Create a form for mapping configuration
-        with st.form("csv_mapping_form"):
-            st.markdown("#### Map Your CSV Columns")
-            st.markdown("Select which column from your CSV file corresponds to each required field.")
-            
-            # Get the actual columns from the CSV if it exists
-            csv_path = _path_for("employees")
-            actual_columns = []
-            if os.path.exists(csv_path):
-                temp_df = pd.read_csv(csv_path, nrows=0)
-                actual_columns = list(temp_df.columns)
-            
-            # Create mapping selectors
-            new_mappings = {}
-            for canonical_col in FILES["employees"][1]:
-                options = actual_columns if actual_columns else [canonical_col]
-                selected = st.selectbox(
-                    f"Map '{canonical_col}' to:",
-                    options=options,
-                    index=options.index(current_mappings.get(canonical_col, canonical_col)) if current_mappings.get(canonical_col) in options else 0,
-                    key=f"mapping_{canonical_col}"
-                )
-                new_mappings[canonical_col] = selected
-            
-            # Submit button
-            submitted = st.form_submit_button("Save Mappings")
-            if submitted:
-                mappings["employees"] = new_mappings
-                save_csv_mappings(mappings)
-                st.success("Column mappings saved! The table will update to reflect the new mappings.")
-                load_table.clear()  # Clear the cache to force reload
-                st.rerun()
+        # Ensure Standard ID and Email are always first and present, even if user deselects them (though they can't)
+        if "Email" not in displayed_columns:
+            displayed_columns.insert(0, "Email") # Should be there via FILES[table_key][1]
+        if "Standard ID" not in displayed_columns:
+            displayed_columns.insert(0, "Standard ID") # Should be there via FILES[table_key][1]
+        # Remove duplicates and maintain order (Standard ID, Email, then selected optional)
+        displayed_columns = sorted(list(set(displayed_columns)), key=lambda x: (x != "Standard ID", x != "Email", x))
+
 
     # Pagination for large datasets
-    df_display = df # Default to full display
-    if len(df) > 1000:
+    # Use df[displayed_columns] for pagination and display
+    df_for_display = df[displayed_columns]
+    df_display_paginated = df_for_display # Default to full display
+    
+    if len(df_for_display) > 1000:
         page_size = st.sidebar.slider("Rows per page", 100, 1000, 500, key=f"pagesize_{table_key}")
-        total_pages = len(df) // page_size + (1 if len(df) % page_size > 0 else 0)
+        total_pages = len(df_for_display) // page_size + (1 if len(df_for_display) % page_size > 0 else 0)
         page = st.sidebar.number_input("Page", 1, total_pages, 1, key=f"page_{table_key}")
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
-        df_display = df.iloc[start_idx:end_idx]
-        st.sidebar.caption(f"Showing {start_idx + 1}-{min(end_idx, len(df))} of {len(df)} rows")
+        df_display_paginated = df_for_display.iloc[start_idx:end_idx]
+        st.sidebar.caption(f"Showing {start_idx + 1}-{min(end_idx, len(df_for_display))} of {len(df_for_display)} rows")
+    else:
+        df_display_paginated = df_for_display # show all if less than 1000
 
     # --- Specific Editor Configurations ---
 
@@ -551,7 +535,7 @@ else:
 
         st.markdown("### Events Table")
         edited_df = st.data_editor(
-            df_display, num_rows="dynamic", key=f"editor_{table_key}",
+            df_display_paginated, num_rows="dynamic", key=f"editor_{table_key}",
             use_container_width=True, column_config=column_config_events
         )
 
@@ -624,7 +608,7 @@ else:
             "Date Started": st.column_config.DateColumn("Date Started", format="YYYY-MM-DD", required=True)
         }
         edited_df = st.data_editor(
-            df_display, num_rows="dynamic", key=f"editor_{table_key}",
+            df_display_paginated, num_rows="dynamic", key=f"editor_{table_key}",
             use_container_width=True, column_config=column_config_cohorts
         )
 
@@ -759,16 +743,27 @@ else:
 
     # Standard editor for other sections
     else:
-        edited_df = st.data_editor(
-            df_display, num_rows="dynamic", key=f"editor_{table_key}",
+        edited_df_subset = st.data_editor(
+            df_display_paginated, 
+            num_rows="dynamic", 
+            key=f"editor_{table_key}",
             use_container_width=True
         )
         if st.button("💾 Save changes", key=f"save_{table_key}"):
-            if len(df) > 1000:
-                df.iloc[start_idx:end_idx] = edited_df
+            if len(df_for_display) > 1000:
+                # Apply changes from edited_df_subset (which is a view of a page) 
+                # back to the corresponding slice of df_for_display
+                df_for_display.iloc[start_idx:end_idx] = edited_df_subset
             else:
-                df = edited_df # Update the main df directly if not paginated
-            save_table(table_key, df)
+                # edited_df_subset is the full df_for_display if not paginated
+                df_for_display = edited_df_subset 
+
+            # Now update the original df with changes from df_for_display
+            for col_to_update in df_for_display.columns:
+                if col_to_update in df.columns:
+                    df[col_to_update] = df_for_display[col_to_update]
+            
+            save_table(table_key, df) # Save the full df
             st.success("Saved to disk.")
             load_table.clear() # Clear cache after saving
             st.rerun()
@@ -779,8 +774,7 @@ else:
     # ---------------------------------------------------------------------------
     if table_key == "employees":
         st.markdown("### Quick Category Tagger")
-        if not df.empty:
-            # Use the full dataframe 'df' for selection, not 'df_display'
+        if not df.empty and "Categories" in df.columns: # Check if Categories column exists
             employee_options = {f"{row['Standard ID']} - {row['Email']}": row['Standard ID']
                                 for _, row in df.iterrows()}
             selected_employee_display = st.selectbox(
