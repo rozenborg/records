@@ -500,14 +500,18 @@ else:
     if table_key == "events":
         # Prepare column configurations for Events data_editor
         workshop_df_for_options = load_table("workshops")
-        workshop_select_options = [f"{row['Workshop #']} - {row['Skill']}: {row['Goal']}"
-                                   for _, row in workshop_df_for_options.iterrows()]
-        workshop_select_options.insert(0, "") # Blank option
+        
+        # MODIFIED: Use actual Workshop # IDs for the SelectboxColumn options
+        valid_workshop_ids = [""] # Start with a blank option for "no workshop"
+        if not workshop_df_for_options.empty:
+            # Get unique Workshop # values and add them to the list
+            valid_workshop_ids.extend(workshop_df_for_options["Workshop #"].unique().tolist())
 
         column_config_events = {
             "Workshop": st.column_config.SelectboxColumn(
                 "Workshop", help="Select the workshop this event is an instance of.",
-                options=workshop_select_options, required=False
+                options=valid_workshop_ids, # Use the actual IDs here
+                required=False
             ),
             "Registrations": st.column_config.TextColumn("Registrations", help="Employee IDs registered (updated via Manage Participation).", disabled=True),
             "Participants": st.column_config.TextColumn("Participants", help="Employee IDs participated (updated via Manage Participation).", disabled=True),
@@ -557,7 +561,8 @@ else:
                 event_id = f"{prefix}{date_str}-{next_seq:02d}"
 
                 new_event = pd.DataFrame([{
-                    "Event ID": event_id, "Name": event_name, "Date": event_date.strftime("%Y-%m-%d"),
+                    "Event ID": event_id, "Name": event_name, 
+                    "Date": pd.to_datetime(event_date.strftime("%Y-%m-%d"), errors='coerce'),
                     "Category": event_category, "Workshop": selected_workshop_id,
                     "Registrations": "", "Participants": ""
                 }])
@@ -814,9 +819,10 @@ else:
 
     elif table_key == "workshops":
         st.info(
-            "Use **Instances** to store comma-separated Event IDs. "
-            "**Registered/Participated** store comma-separated Standard IDs.\n\n"
-            "Relations are simple CSV references; production apps need a database."
+            """Use **Instances** to store comma-separated Event IDs.
+            **Registered/Participated** store comma-separated Standard IDs.
+
+            Relations are simple CSV references; production apps need a database."""
         )
 
     elif table_key == "cohorts":
