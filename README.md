@@ -29,23 +29,31 @@ A Streamlit-based application to manage and track participation in an AI Adoptio
 
 ## Setup
 
-1. **Create a virtual environment**:
+1. **Clone the repository**:
+   ```
+   git clone https://github.com/rozenborg/records.git
+   cd records
+   ```
+
+2. **Create a virtual environment**:
    ```
    python3.9 -m venv venv
    source venv/bin/activate  # On Windows: venv\Scripts\activate
    ```
 
-2. **Install dependencies**:
+3. **Install dependencies**:
    ```
    pip install -r requirements.txt
    ```
 
-3. **Prepare your `employees.csv`**:
-   Ensure your `employees.csv` file is in the `data/` directory (the app will create `data/` if it doesn't exist). 
-   This file **must** contain columns named `Standard ID` and `Work Email Address`.
-   Other columns are optional and will be loaded if present.
+4. **Prepare your data files**:
+   - Create a `data/` directory in the project root (the app will create it if it doesn't exist)
+   - Place your `employees.csv` file in the `data/` directory
+   - The `employees.csv` file **must** contain columns named `Standard ID` and `Work Email Address`
+   - Other columns in your CSV will be loaded automatically
+   - The application will create empty files for other required CSVs (`workshops.csv`, `events.csv`, `cohorts.csv`, `participants.csv`) on first run
 
-4. **Run the application**:
+5. **Run the application**:
    ```
    streamlit run app.py
    ```
@@ -81,7 +89,7 @@ A Streamlit-based application to manage and track participation in an AI Adoptio
 
 ## Data Storage
 
-All data is stored as CSV files in the `data/` directory. The application will create empty CSV files with default headers if they are not found on startup, except for `employees.csv` which you should provide with at least 'Standard ID' and 'Work Email Address' columns.
+All data is stored as CSV files in the `data/` directory. The application will create empty CSV files with default headers if they are not found on startup, except for `employees.csv` which you must provide with at least 'Standard ID' and 'Work Email Address' columns.
 
 ## Performance Considerations
 
