@@ -3,25 +3,21 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 import io # Needed for file uploads
-import json
 
 ###############################################################################
 # Configuration
 ###############################################################################
 DATA_DIR = "data"              # Folder where CSV files live (created if needed)
-# CONFIG_FILE = os.path.join(DATA_DIR, "csv_mappings.json") # Removed
 
-# Default column mappings for each table
-DEFAULT_MAPPINGS = { # Simplified - only for internal canonical names now
+# Default column mappings for employees table
+DEFAULT_MAPPINGS = {
     "employees": {
         "Standard ID": "Standard ID", # Assumed to exist in CSV
         "Email": "Work Email Address", # This is what we expect in CSV for our internal "Email"
-        # Other fields are dynamic
     }
 }
 
 # Each logical table maps to a CSV file and a list of its canonical columns
-# For employees, canonical cols are what we ensure exist + what's dynamically loaded
 FILES = {
     "employees": ("employees.csv", ["Standard ID", "Email"]), # Core internal columns
     "workshops": ("workshops.csv", [
@@ -64,23 +60,6 @@ def ensure_data_dir() -> None:
     """Create data directory if it doesn't exist."""
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
-    
-    # Initialize CSV mappings if they don't exist # Removed
-    # if not os.path.exists(CONFIG_FILE):
-    #     with open(CONFIG_FILE, 'w') as f:
-    #         json.dump(DEFAULT_MAPPINGS, f, indent=2)
-
-# def load_csv_mappings(): # Removed
-#     """Load CSV column mappings from config file."""
-#     if os.path.exists(CONFIG_FILE):
-#         with open(CONFIG_FILE, 'r') as f:
-#             return json.load(f)
-#     return DEFAULT_MAPPINGS
-
-# def save_csv_mappings(mappings): # Removed
-#     """Save CSV column mappings to config file."""
-#     with open(CONFIG_FILE, 'w') as f:
-#         json.dump(mappings, f, indent=2)
 
 def _path_for(key: str) -> str:
     """Absolute CSV path for a given logical table key."""
@@ -137,13 +116,11 @@ def load_table(key: str) -> pd.DataFrame:
             df["Date Started"] = pd.Series(dtype='datetime64[ns]')
         
         # For a new employees.csv, we need to map internal "Email" back to "Work Email Address"
-        # if we were to save it immediately, but save_table doesn't do reverse mapping yet.
-        # For now, we just save with internal names.
+        # if we were to save it immediately
         df_to_save = df.copy()
         if key == "employees":
              # If we were to save with external names, this is where we'd rename "Email" back
-             # df_to_save = df_to_save.rename(columns={"Email": "Work Email Address"})
-             pass # Keep internal names for now
+             df_to_save = df_to_save.rename(columns={"Email": "Work Email Address"})
         df_to_save.to_csv(path, index=False)
 
     # Ensure all *expected* (canonical + dynamic for employees) columns exist in the DataFrame
@@ -164,7 +141,13 @@ def load_table(key: str) -> pd.DataFrame:
 def save_table(key: str, df: pd.DataFrame) -> None:
     """Persist *df* back to disk for logical table *key*."""
     path = _path_for(key)
-    df.to_csv(path, index=False)
+    
+    # For employees, convert internal "Email" back to "Work Email Address" when saving
+    df_to_save = df.copy()
+    if key == "employees" and "Email" in df.columns:
+        df_to_save = df_to_save.rename(columns={"Email": "Work Email Address"})
+        
+    df_to_save.to_csv(path, index=False)
 
 
 def get_employee_ids_from_input(input_str: str, all_employees: pd.DataFrame) -> tuple[list[str], list[str]]:
