@@ -5,11 +5,12 @@ import streamlit as st
 import io # Needed for file uploads
 import shutil # For file operations
 import json # For version control
+from typing import Union # Import Union
 
 ###############################################################################
 # Version Control & Migration
 ###############################################################################
-APP_VERSION = "1.0.0"  # Current app version
+APP_VERSION = "1.2.2"  # Current app version
 VERSION_FILE = "version.json"  # Stores schema version info
 BACKUP_DIR = "backups"  # Directory for data backups
 
@@ -55,7 +56,11 @@ def run_migrations(from_version, to_version):
     """Run database migrations from one version to another."""
     # Define migrations as a dictionary with from_version -> to_version keys and migration functions as values
     migrations = {
-        '0.0.0->1.0.0': migrate_from_0_to_1
+        '0.0.0->1.0.0': migrate_from_0_to_1,
+        '1.0.0->1.1.0': migrate_from_1_0_0_to_1_1_0,
+        '1.1.0->1.2.0': migrate_from_1_1_0_to_1_2_0, # New participant data structure
+        '1.2.0->1.2.1': migrate_from_1_2_0_to_1_2_1,
+        '1.2.1->1.2.2': migrate_from_1_2_1_to_1_2_2
     }
     
     # Execute appropriate migration based on version transition
@@ -109,6 +114,283 @@ def migrate_from_0_to_1():
         st.error(f"Migration failed: {str(e)}")
         raise
 
+# Migration for version 1.1.0
+def migrate_from_1_0_0_to_1_1_0():
+    """Migration from version 1.0.0 to 1.1.0 for cohorts.
+    - Renames 'Nominees' to 'Nominated' in cohorts.csv.
+    - Renames 'Participants' to 'Joined' in cohorts.csv.
+    - Adds 'Invited' column to cohorts.csv.
+    """
+    try:
+        cohorts_path = os.path.join(DATA_DIR, "cohorts.csv")
+        if os.path.exists(cohorts_path):
+            df = pd.read_csv(cohorts_path)
+            changes_made = False
+            # Rename Nominees to Nominated
+            if "Nominees" in df.columns:
+                if "Nominated" not in df.columns:
+                    df = df.rename(columns={"Nominees": "Nominated"})
+                    st.info("Renamed 'Nominees' to 'Nominated' in cohorts.csv")
+                    changes_made = True
+                else: # Both exist, drop old Nominees if it's different or just ensure it's gone
+                    if not df["Nominees"].equals(df["Nominated"]):
+                         st.warning("Both 'Nominees' and 'Nominated' columns found with different data. Prioritizing 'Nominated'. Old 'Nominees' data might be lost if not manually merged.")
+                    df = df.drop(columns=["Nominees"])
+                    st.info("Dropped legacy 'Nominees' column in cohorts.csv as 'Nominated' exists.")
+                    changes_made = True
+            
+            # Rename Participants to Joined
+            if "Participants" in df.columns:
+                if "Joined" not in df.columns:
+                    df = df.rename(columns={"Participants": "Joined"})
+                    st.info("Renamed 'Participants' to 'Joined' in cohorts.csv")
+                    changes_made = True
+                else: # Both exist, drop old Participants
+                    if not df["Participants"].equals(df["Joined"]):
+                        st.warning("Both 'Participants' and 'Joined' columns found with different data. Prioritizing 'Joined'. Old 'Participants' data might be lost if not manually merged.")
+                    df = df.drop(columns=["Participants"])
+                    st.info("Dropped legacy 'Participants' column in cohorts.csv as 'Joined' exists.")
+                    changes_made = True
+
+            # Add Invited column
+            if "Invited" not in df.columns:
+                df["Invited"] = ""  # Default to empty string
+                st.info("Added 'Invited' column to cohorts.csv")
+                changes_made = True
+            
+            if changes_made:
+                df.to_csv(cohorts_path, index=False)
+                st.info("cohorts.csv updated by migration to v1.1.0")
+
+    except Exception as e:
+        st.error(f"Migration to 1.1.0 (cohorts) failed: {str(e)}")
+        raise
+
+# Migration for version 1.2.0: Restructures participants.csv
+def migrate_from_1_1_0_to_1_2_0():
+    """Migration from v1.1.0 to v1.2.0:
+    Restructures participants.csv to be one row per employee, aggregating event
+    and cohort data into comma-separated lists.
+    """
+    st.info("Starting migration to v1.2.0 for participants data structure...")
+    try:
+        employees_df = load_table("employees") # Load with new load_table
+        if employees_df.empty:
+            st.warning("Employees table is empty. Skipping participants migration as there's no base data.")
+            # Create an empty participants.csv with the new schema if it doesn't exist or is old
+            participants_path = _path_for("participants")
+            _, new_participant_cols = FILES["participants"]
+            # Check if participants.csv exists and if its columns match the new schema
+            create_new_empty = True
+            if os.path.exists(participants_path):
+                try:
+                    current_participant_df_cols = pd.read_csv(participants_path, nrows=0).columns.tolist()
+                    if set(current_participant_df_cols) == set(new_participant_cols):
+                        create_new_empty = False # Already new schema
+                except Exception:
+                    pass # Will be overwritten
+            
+            if create_new_empty:
+                pd.DataFrame(columns=new_participant_cols).to_csv(participants_path, index=False)
+                st.info("Created empty participants.csv with new schema.")
+            return
+
+        new_participants_cols = FILES["participants"][1]
+        # Initialize new participants DataFrame from employees
+        new_participants_df = employees_df[["Standard ID", "Email"]].copy()
+        for col in new_participants_cols:
+            if col not in new_participants_df.columns:
+                new_participants_df[col] = ""
+
+        new_participants_df["Last Updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Prepare for aggregation (use sets to handle duplicates, then join)
+        # Initialize dictionary to hold sets of IDs/names for each employee
+        agg_data = {emp_id: {
+            "Events Registered": set(),
+            "Events Participated": set(),
+            "Events Hosted": set(),
+            "Cohorts Nominated": set(),
+            "Cohorts Invited": set(),
+            "Cohorts Joined": set()
+        } for emp_id in new_participants_df["Standard ID"]}
+
+        # 1. Process old participants.csv (if it exists and is in the old format)
+        old_participants_path = os.path.join(DATA_DIR, "participants.csv")
+        if os.path.exists(old_participants_path):
+            try:
+                old_participants_df = pd.read_csv(old_participants_path, dtype=str, na_filter=False).fillna("")
+                # Check if it's the old format by looking for "Event ID" and "Registered" etc.
+                if "Event ID" in old_participants_df.columns and "Registered" in old_participants_df.columns:
+                    st.info("Processing data from existing (old format) participants.csv...")
+                    for _, row in old_participants_df.iterrows():
+                        emp_id = str(row["Standard ID"])
+                        event_id = str(row["Event ID"])
+                        if emp_id in agg_data: # Ensure employee exists in our master list
+                            if str(row.get("Registered", "")).lower() == "yes":
+                                agg_data[emp_id]["Events Registered"].add(event_id)
+                            if str(row.get("Participated", "")).lower() == "yes":
+                                agg_data[emp_id]["Events Participated"].add(event_id)
+                            if str(row.get("Hosted", "")).lower() == "yes":
+                                agg_data[emp_id]["Events Hosted"].add(event_id)
+                    st.info("Completed processing old participants.csv data.")
+                else:
+                    st.info("Existing participants.csv does not seem to be old format. Will ensure schema matches new format.")
+            except Exception as e:
+                st.warning(f"Could not process old participants.csv: {e}. It might be empty or corrupted. Will proceed assuming no prior participant event details.")
+
+        # 2. Process events.csv to ensure all event links are captured
+        events_path = _path_for("events")
+        if os.path.exists(events_path):
+            try:
+                events_df = pd.read_csv(events_path, dtype=str, na_filter=False).fillna("")
+                st.info("Processing data from events.csv...")
+                for _, event_row in events_df.iterrows():
+                    event_id = str(event_row["Event ID"])
+                    for emp_id_str in str(event_row.get("Registrations", "")).split(','):
+                        emp_id = emp_id_str.strip()
+                        if emp_id and emp_id in agg_data:
+                            agg_data[emp_id]["Events Registered"].add(event_id)
+                    for emp_id_str in str(event_row.get("Participants", "")).split(','):
+                        emp_id = emp_id_str.strip()
+                        if emp_id and emp_id in agg_data:
+                            agg_data[emp_id]["Events Participated"].add(event_id)
+                    for emp_id_str in str(event_row.get("Hosted", "")).split(','):
+                        emp_id = emp_id_str.strip()
+                        if emp_id and emp_id in agg_data:
+                            agg_data[emp_id]["Events Hosted"].add(event_id)
+                st.info("Completed processing events.csv data.")
+            except Exception as e:
+                st.error(f"Failed to process events.csv during migration: {e}")
+                raise
+
+        # 3. Process cohorts.csv
+        cohorts_path = _path_for("cohorts")
+        if os.path.exists(cohorts_path):
+            try:
+                cohorts_df = pd.read_csv(cohorts_path, dtype=str, na_filter=False).fillna("")
+                st.info("Processing data from cohorts.csv...")
+                for _, cohort_row in cohorts_df.iterrows():
+                    cohort_name = str(cohort_row["Name"])
+                    for emp_id_str in str(cohort_row.get("Nominated", "")).split(','): # Uses "Nominated" from v1.1.0
+                        emp_id = emp_id_str.strip()
+                        if emp_id and emp_id in agg_data:
+                            agg_data[emp_id]["Cohorts Nominated"].add(cohort_name)
+                    for emp_id_str in str(cohort_row.get("Invited", "")).split(','):
+                        emp_id = emp_id_str.strip()
+                        if emp_id and emp_id in agg_data:
+                            agg_data[emp_id]["Cohorts Invited"].add(cohort_name)
+                    for emp_id_str in str(cohort_row.get("Joined", "")).split(','): # Uses "Joined" from v1.1.0
+                        emp_id = emp_id_str.strip()
+                        if emp_id and emp_id in agg_data:
+                            agg_data[emp_id]["Cohorts Joined"].add(cohort_name)
+                st.info("Completed processing cohorts.csv data.")
+            except Exception as e:
+                st.error(f"Failed to process cohorts.csv during migration: {e}")
+                raise
+        
+        # Populate the new_participants_df with aggregated data
+        st.info("Aggregating processed data into new participants structure...")
+        for emp_id, data_sets in agg_data.items():
+            idx = new_participants_df[new_participants_df["Standard ID"] == emp_id].index
+            if not idx.empty:
+                target_idx = idx[0]
+                new_participants_df.loc[target_idx, "Events Registered"] = ",".join(sorted(list(filter(None, data_sets["Events Registered"]))))
+                new_participants_df.loc[target_idx, "Events Participated"] = ",".join(sorted(list(filter(None, data_sets["Events Participated"]))))
+                new_participants_df.loc[target_idx, "Events Hosted"] = ",".join(sorted(list(filter(None, data_sets["Events Hosted"]))))
+                new_participants_df.loc[target_idx, "Cohorts Nominated"] = ",".join(sorted(list(filter(None, data_sets["Cohorts Nominated"]))))
+                new_participants_df.loc[target_idx, "Cohorts Invited"] = ",".join(sorted(list(filter(None, data_sets["Cohorts Invited"]))))
+                new_participants_df.loc[target_idx, "Cohorts Joined"] = ",".join(sorted(list(filter(None, data_sets["Cohorts Joined"]))))
+                # "Nominated By" remains empty for now as this data isn't tracked previously
+                new_participants_df.loc[target_idx, "Nominated By"] = "" 
+        
+        # Ensure all columns are present and fill NaNs just in case
+        for col in new_participants_cols:
+            if col not in new_participants_df.columns:
+                new_participants_df[col] = ""
+        new_participants_df = new_participants_df.fillna("")
+
+        # Save the new participants.csv
+        final_participants_path = _path_for("participants")
+        new_participants_df[new_participants_cols].to_csv(final_participants_path, index=False) # Enforce column order
+        st.success("Successfully migrated participants data to new structure (v1.2.0).")
+        load_table.clear() # Clear cache
+
+    except Exception as e:
+        st.error(f"Migration to v1.2.0 (participants restructure) failed: {str(e)}")
+        st.error("Your data might be in an inconsistent state. Consider restoring from a backup if issues persist.")
+        raise
+
+# Migration for version 1.2.1: Adds 'On General Waitlist' to participants
+def migrate_from_1_2_0_to_1_2_1():
+    """Migration from v1.2.0 to v1.2.1:
+    - Removes 'Waitlisted' column from events.csv if it was added by a previous incorrect migration attempt for 1.2.1.
+    - Adds 'On General Waitlist' (Yes/No string) to participants.csv.
+    - Removes 'Events Waitlisted' column from participants.csv if it was added by a previous incorrect migration attempt for 1.2.1.
+    """
+    st.info("Starting migration to v1.2.1 for 'On General Waitlist' feature...")
+    try:
+        # Attempt to remove 'Waitlisted' from events.csv (if it exists from previous incorrect migration)
+        events_path = _path_for("events")
+        if os.path.exists(events_path):
+            try:
+                events_df = pd.read_csv(events_path, dtype=str, na_filter=False).fillna("")
+                if "Waitlisted" in events_df.columns:
+                    events_df = events_df.drop(columns=["Waitlisted"])
+                    events_df.to_csv(events_path, index=False)
+                    st.info("Removed legacy 'Waitlisted' column from events.csv.")
+            except Exception as e:
+                st.warning(f"Could not process events.csv to remove old Waitlisted column: {e}")
+
+        # Add 'On General Waitlist' to participants.csv and remove old 'Events Waitlisted'
+        participants_path = _path_for("participants")
+        if os.path.exists(participants_path):
+            participants_df = pd.read_csv(participants_path, dtype=str, na_filter=False).fillna("")
+            made_changes_participants = False
+            if "Events Waitlisted" in participants_df.columns:
+                participants_df = participants_df.drop(columns=["Events Waitlisted"])
+                st.info("Removed legacy 'Events Waitlisted' column from participants.csv.")
+                made_changes_participants = True
+            
+            if "On General Waitlist" not in participants_df.columns:
+                participants_df["On General Waitlist"] = "No"  # Default to "No"
+                st.info("Added 'On General Waitlist' column to participants.csv (defaulted to 'No').")
+                made_changes_participants = True
+            
+            if made_changes_participants:
+                participants_df.to_csv(participants_path, index=False)
+        else:
+            st.warning("participants.csv not found during migration 1.2.0->1.2.1. It should have been created by previous migration. If this is a fresh install, it's okay, schema will be applied on first load.")
+        
+        st.success("Successfully migrated to v1.2.1 for 'On General Waitlist' feature.")
+        load_table.clear()
+    except Exception as e:
+        st.error(f"Migration to v1.2.1 (On General Waitlist) failed: {str(e)}")
+        raise
+
+# Migration for version 1.2.2: Adds 'Tags' to participants
+def migrate_from_1_2_1_to_1_2_2():
+    """Migration from v1.2.1 to v1.2.2:
+    - Adds 'Tags' (comma-separated string) to participants.csv.
+    """
+    st.info("Starting migration to v1.2.2 for 'Tags' column...")
+    try:
+        participants_path = _path_for("participants")
+        if os.path.exists(participants_path):
+            participants_df = pd.read_csv(participants_path, dtype=str, na_filter=False).fillna("")
+            if "Tags" not in participants_df.columns:
+                participants_df["Tags"] = ""  # Default to empty string
+                participants_df.to_csv(participants_path, index=False)
+                st.info("Added 'Tags' column to participants.csv.")
+        else:
+            st.warning("participants.csv not found during migration 1.2.1->1.2.2. It should have been created by previous migrations. If this is a fresh install, it will be created with the new schema on first load.")
+        
+        st.success("Successfully migrated to v1.2.2, 'Tags' column added.")
+        load_table.clear()
+    except Exception as e:
+        st.error(f"Migration to v1.2.2 ('Tags' column) failed: {str(e)}")
+        raise
+
 ###############################################################################
 # Configuration
 ###############################################################################
@@ -133,8 +415,9 @@ FILES = {
     ]),
     "cohorts": ("cohorts.csv", [
         "Name", "Date Started",
-        "Nominees",        # Comma-separated Standard IDs
-        "Participants"      # Comma-separated Standard IDs
+        "Nominated",       # Comma-separated Standard IDs
+        "Invited",         # Comma-separated Standard IDs
+        "Joined"           # Comma-separated Standard IDs
     ]),
     "events": ("events.csv", [
         "Event ID", "Name", "Date",
@@ -142,14 +425,20 @@ FILES = {
         "Workshop",         # If Category == Workshop ➜ Workshop #
         "Hosted",        # Comma-separated Standard IDs of hosts (now managed via Participants)
         "Registrations",    # Comma-separated Standard IDs
-        "Participants"      # Comma-separated Standard IDs
+        "Participants"     # Comma-separated Standard IDs
     ]),
     "participants": ("participants.csv", [
-        "Standard ID", "Email", "Event ID", "Event Name", "Event Date",
-        "Registered",       # New: "Yes" or "No" (or blank for new)
-        "Participated",     # New: "Yes" or "No" (or blank for new)
-        "Hosted",           # New: "Yes" or "No" (participant also hosted this event)
-        "Last Updated"      # Timestamp of last update
+        "Standard ID", "Email",
+        "Events Registered",    # Comma-separated Event IDs
+        "Events Participated",  # Comma-separated Event IDs
+        "Events Hosted",        # Comma-separated Event IDs
+        "Waitlist",             # "Yes" or "No"
+        "Cohorts Nominated",    # Comma-separated Cohort Names
+        "Cohorts Invited",      # Comma-separated Cohort Names
+        "Cohorts Joined",       # Comma-separated Cohort Names
+        "Nominated By",         # Comma-separated Employee Emails/IDs
+        "Tags",                 # Comma-separated string of tags
+        "Last Updated"          # Timestamp
     ])
 }
 
@@ -309,148 +598,188 @@ def get_employee_ids_from_input(input_str: str, all_employees: pd.DataFrame) -> 
     return sorted(list(valid_ids)), invalid_inputs
 
 
-def update_event_participation(event_id: str, employee_ids: list[str], mark_registered: bool, mark_participated: bool, mark_hosted: bool) -> tuple[int, int, int]:
-    """Adds employee IDs to the Registrations, Participants, and Hosted fields for a given event.
-    Updates participant records, additively setting Registered/Participated/Hosted status if marked."""
+def update_employee_event_status(employee_ids: list[str], event_id: str, mark_registered: Union[bool, None], mark_participated: Union[bool, None], mark_hosted: Union[bool, None]) -> tuple[int, int, int]:
+    """Updates event status (Registered, Participated, Hosted) for employees by ADDING them to the respective lists if marked.
+    Does NOT remove employees from lists if a mark is False/None. Removals must be handled manually if needed.
+    """
     if not event_id or not employee_ids:
         return 0, 0, 0
 
+    participants_df = load_table("participants")
     events_df = load_table("events")
     employees_df = load_table("employees")
-    participants_df = load_table("participants")
     load_table.clear()
 
-    event_index = events_df.index[events_df["Event ID"] == event_id].tolist()
-    if not event_index:
-        st.error(f"Event ID {event_id} not found.")
+    event_row_series = events_df[events_df["Event ID"] == event_id]
+    if event_row_series.empty:
+        st.error(f"Event ID {event_id} not found in events.csv.")
         return 0, 0, 0
+    event_idx = event_row_series.index[0]
 
-    idx = event_index[0]
-    event_name = events_df.loc[idx, "Name"]
-    event_date = events_df.loc[idx, "Date"]
-    added_to_event_registered_list = 0
-    added_to_event_participated_list = 0
-    added_to_event_hosted_list = 0
+    newly_registered_count = 0
+    newly_participated_count = 0
+    newly_hosted_count = 0
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Update events.csv lists
-    # Registrations list
-    current_event_registrations = set(events_df.loc[idx, "Registrations"].split(',') if events_df.loc[idx, "Registrations"] else [])
-    initial_len_reg = len(current_event_registrations)
-    if mark_registered:
-        current_event_registrations.update(employee_ids)
-    events_df.loc[idx, "Registrations"] = ",".join(sorted(list(filter(None, current_event_registrations))))
-    if mark_registered:
-      added_to_event_registered_list = len(current_event_registrations) - initial_len_reg
+    # --- Update events.csv --- 
+    event_registrations = set(str(events_df.loc[event_idx, "Registrations"]).split(',') if events_df.loc[event_idx, "Registrations"] else [])
+    event_participants = set(str(events_df.loc[event_idx, "Participants"]).split(',') if events_df.loc[event_idx, "Participants"] else [])
+    event_hosts = set(str(events_df.loc[event_idx, "Hosted"]).split(',') if events_df.loc[event_idx, "Hosted"] else [])
 
-    # Participants list
-    current_event_participants = set(events_df.loc[idx, "Participants"].split(',') if events_df.loc[idx, "Participants"] else [])
-    initial_len_part = len(current_event_participants)
-    if mark_participated:
-        current_event_participants.update(employee_ids)
-    events_df.loc[idx, "Participants"] = ",".join(sorted(list(filter(None, current_event_participants))))
-    if mark_participated:
-        added_to_event_participated_list = len(current_event_participants) - initial_len_part
-        
-    # Hosted list
-    current_event_hosts = set(events_df.loc[idx, "Hosted"].split(',') if events_df.loc[idx, "Hosted"] else [])
-    initial_len_host = len(current_event_hosts)
-    if mark_hosted:
-        current_event_hosts.update(employee_ids)
-    events_df.loc[idx, "Hosted"] = ",".join(sorted(list(filter(None, current_event_hosts))))
-    if mark_hosted:
-        added_to_event_hosted_list = len(current_event_hosts) - initial_len_host
+    # Store initial lengths to calculate *newly added* later
+    initial_event_reg_len = len(event_registrations)
+    initial_event_part_len = len(event_participants)
+    initial_event_host_len = len(event_hosts)
 
-
-    # Update participants.csv
-    new_participant_records = []
     for emp_id in employee_ids:
-        emp_row = employees_df[employees_df["Standard ID"] == emp_id]
-        if emp_row.empty:
-            st.warning(f"Employee ID {emp_id} not found in employees table. Skipping participation record.")
-            continue
-        emp_email = emp_row["Email"].iloc[0]
+        if mark_registered is True:
+            event_registrations.add(emp_id)
         
-        existing_record_indices = participants_df[
-            (participants_df["Standard ID"] == emp_id) & 
-            (participants_df["Event ID"] == event_id)
-        ].index
-        
-        if existing_record_indices.empty:
-            new_participant_records.append({
-                "Standard ID": emp_id,
-                "Email": emp_email,
-                "Event ID": event_id,
-                "Event Name": event_name,
-                "Event Date": event_date.strftime("%Y-%m-%d") if isinstance(event_date, pd.Timestamp) else event_date,
-                "Registered": "Yes" if mark_registered else "No",
-                "Participated": "Yes" if mark_participated else "No",
-                "Hosted": "Yes" if mark_hosted else "No",
-                "Last Updated": current_time
-            })
+        if mark_participated is True:
+            event_participants.add(emp_id)
+
+        if mark_hosted is True:
+            event_hosts.add(emp_id)
+
+    events_df.loc[event_idx, "Registrations"] = ",".join(sorted(list(filter(None, event_registrations))))
+    events_df.loc[event_idx, "Participants"] = ",".join(sorted(list(filter(None, event_participants))))
+    events_df.loc[event_idx, "Hosted"] = ",".join(sorted(list(filter(None, event_hosts))))
+
+    if mark_registered is True: newly_registered_count = len(event_registrations) - initial_event_reg_len
+    if mark_participated is True: newly_participated_count = len(event_participants) - initial_event_part_len
+    if mark_hosted is True: newly_hosted_count = len(event_hosts) - initial_event_host_len
+
+    # --- Update participants.csv --- 
+    for emp_id in employee_ids:
+        participant_indices = participants_df[participants_df["Standard ID"] == emp_id].index
+        participant_idx = -1 
+        if participant_indices.empty:
+            emp_details = employees_df[employees_df["Standard ID"] == emp_id]
+            email = emp_details["Email"].iloc[0] if not emp_details.empty else ""
+            new_row_data = {col: "" for col in participants_df.columns}
+            new_row_data["Standard ID"] = emp_id
+            new_row_data["Email"] = email
+            if "Waitlist" in new_row_data: new_row_data["Waitlist"] = "No"
+            
+            participants_df = pd.concat([participants_df, pd.DataFrame([new_row_data])], ignore_index=True)
+            participant_idx = participants_df[participants_df["Standard ID"] == emp_id].index[0]
+            st.info(f"Created new entry in participants.csv for {emp_id}")
         else:
-            record_idx_to_update = existing_record_indices[0]
-            changed_in_existing = False
-            if mark_registered and participants_df.loc[record_idx_to_update, "Registered"] != "Yes":
-                participants_df.loc[record_idx_to_update, "Registered"] = "Yes"
-                changed_in_existing = True
-            
-            if mark_participated and participants_df.loc[record_idx_to_update, "Participated"] != "Yes":
-                participants_df.loc[record_idx_to_update, "Participated"] = "Yes"
-                changed_in_existing = True
-            
-            if mark_hosted and participants_df.loc[record_idx_to_update, "Hosted"] != "Yes":
-                participants_df.loc[record_idx_to_update, "Hosted"] = "Yes"
-                changed_in_existing = True
+            participant_idx = participant_indices[0]
 
-            if changed_in_existing:
-                 participants_df.loc[record_idx_to_update, "Last Updated"] = current_time
+        emp_events_registered = set(str(participants_df.loc[participant_idx, "Events Registered"]).split(',') if participants_df.loc[participant_idx, "Events Registered"] else [])
+        emp_events_participated = set(str(participants_df.loc[participant_idx, "Events Participated"]).split(',') if participants_df.loc[participant_idx, "Events Participated"] else [])
+        emp_events_hosted = set(str(participants_df.loc[participant_idx, "Events Hosted"]).split(',') if participants_df.loc[participant_idx, "Events Hosted"] else [])
 
-    if new_participant_records:
-        new_records_df = pd.DataFrame(new_participant_records)
-        participants_df = pd.concat([participants_df, new_records_df], ignore_index=True)
+        action_taken_on_participant_record = False
+        if mark_registered is True and event_id not in emp_events_registered: 
+            emp_events_registered.add(event_id); action_taken_on_participant_record = True
+            
+        if mark_participated is True and event_id not in emp_events_participated: 
+            emp_events_participated.add(event_id); action_taken_on_participant_record = True
+
+        if mark_hosted is True and event_id not in emp_events_hosted: 
+            emp_events_hosted.add(event_id); action_taken_on_participant_record = True
+
+        participants_df.loc[participant_idx, "Events Registered"] = ",".join(sorted(list(filter(None, emp_events_registered))))
+        participants_df.loc[participant_idx, "Events Participated"] = ",".join(sorted(list(filter(None, emp_events_participated))))
+        participants_df.loc[participant_idx, "Events Hosted"] = ",".join(sorted(list(filter(None, emp_events_hosted))))
+        
+        if action_taken_on_participant_record:
+            participants_df.loc[participant_idx, "Last Updated"] = current_time
 
     save_table("events", events_df)
     save_table("participants", participants_df)
     load_table.clear()
-    return added_to_event_registered_list, added_to_event_participated_list, added_to_event_hosted_list
+    return newly_registered_count, newly_participated_count, newly_hosted_count
 
 
-def update_cohort_membership(cohort_name: str, employee_ids: list[str], mark_nominated: bool, mark_participant: bool) -> tuple[int, int]:
-    """Adds employee IDs to the Nominees and/or Participants fields for a given cohort."""
-    if not cohort_name or not employee_ids or (not mark_nominated and not mark_participant):
-        return 0, 0 # Nothing to do
+def update_cohort_membership(cohort_name: str, employee_ids: list[str], mark_nominated: bool, mark_invited: bool, mark_joined: bool) -> tuple[int, int, int]:
+    """Adds employee IDs to the Nominated, Invited, and/or Joined fields for a given cohort."""
+    if not cohort_name or not employee_ids or (not mark_nominated and not mark_invited and not mark_joined):
+        return 0, 0, 0 # Nothing to do
 
     cohorts_df = load_table("cohorts")
-    load_table.clear() # Ensure we work with latest data
+    participants_df = load_table("participants") # Load participants.csv
+    # load_table.clear() # Clear after all reads, before writes, or at the very end.
 
-    cohort_index = cohorts_df.index[cohorts_df["Name"] == cohort_name].tolist()
-    if not cohort_index:
+    cohort_index_list = cohorts_df.index[cohorts_df["Name"] == cohort_name].tolist()
+    if not cohort_index_list:
         st.error(f"Cohort Name '{cohort_name}' not found.")
-        return 0, 0
+        return 0, 0, 0
+    cohort_idx = cohort_index_list[0]
 
-    idx = cohort_index[0]
-    added_nominees = 0
-    added_participants = 0
-
-    # Update cohorts.csv
+    added_nominees_count = 0
+    added_invited_count = 0
+    added_joined_count = 0
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # --- Update cohorts.csv --- 
+    # For Nominated
     if mark_nominated:
-        current_nominees = set(cohorts_df.loc[idx, "Nominees"].split(',') if cohorts_df.loc[idx, "Nominees"] else [])
-        initial_len = len(current_nominees)
-        current_nominees.update(employee_ids)
-        cohorts_df.loc[idx, "Nominees"] = ",".join(sorted(list(current_nominees)))
-        added_nominees = len(current_nominees) - initial_len
+        current_cohort_nominees = set(str(cohorts_df.loc[cohort_idx, "Nominated"]).split(',') if cohorts_df.loc[cohort_idx, "Nominated"] else [])
+        initial_len = len(current_cohort_nominees)
+        current_cohort_nominees.update(employee_ids)
+        cohorts_df.loc[cohort_idx, "Nominated"] = ",".join(sorted(list(filter(None, current_cohort_nominees))))
+        added_nominees_count = len(current_cohort_nominees) - initial_len
 
-    if mark_participant:
-        current_participants = set(cohorts_df.loc[idx, "Participants"].split(',') if cohorts_df.loc[idx, "Participants"] else [])
-        initial_len = len(current_participants)
-        current_participants.update(employee_ids)
-        cohorts_df.loc[idx, "Participants"] = ",".join(sorted(list(current_participants)))
-        added_participants = len(current_participants) - initial_len
+    # For Invited
+    if mark_invited:
+        current_cohort_invited = set(str(cohorts_df.loc[cohort_idx, "Invited"]).split(',') if cohorts_df.loc[cohort_idx, "Invited"] else [])
+        initial_len_inv = len(current_cohort_invited)
+        current_cohort_invited.update(employee_ids)
+        cohorts_df.loc[cohort_idx, "Invited"] = ",".join(sorted(list(filter(None, current_cohort_invited))))
+        added_invited_count = len(current_cohort_invited) - initial_len_inv
+
+    # For Joined
+    if mark_joined:
+        current_cohort_joined = set(str(cohorts_df.loc[cohort_idx, "Joined"]).split(',') if cohorts_df.loc[cohort_idx, "Joined"] else [])
+        initial_len_join = len(current_cohort_joined)
+        current_cohort_joined.update(employee_ids)
+        cohorts_df.loc[cohort_idx, "Joined"] = ",".join(sorted(list(filter(None, current_cohort_joined))))
+        added_joined_count = len(current_cohort_joined) - initial_len_join
+
+    # --- Update participants.csv ---
+    participants_file_updated = False
+    for emp_id in employee_ids:
+        participant_indices = participants_df[participants_df["Standard ID"] == emp_id].index
+        if not participant_indices.empty:
+            participant_idx = participant_indices[0]
+            participant_row_changed = False
+
+            if mark_nominated:
+                emp_cohorts_nominated = set(str(participants_df.loc[participant_idx, "Cohorts Nominated"]).split(',') if participants_df.loc[participant_idx, "Cohorts Nominated"] else [])
+                if cohort_name not in emp_cohorts_nominated:
+                    emp_cohorts_nominated.add(cohort_name)
+                    participants_df.loc[participant_idx, "Cohorts Nominated"] = ",".join(sorted(list(filter(None, emp_cohorts_nominated))))
+                    participant_row_changed = True
+            
+            if mark_invited:
+                emp_cohorts_invited = set(str(participants_df.loc[participant_idx, "Cohorts Invited"]).split(',') if participants_df.loc[participant_idx, "Cohorts Invited"] else [])
+                if cohort_name not in emp_cohorts_invited:
+                    emp_cohorts_invited.add(cohort_name)
+                    participants_df.loc[participant_idx, "Cohorts Invited"] = ",".join(sorted(list(filter(None, emp_cohorts_invited))))
+                    participant_row_changed = True
+
+            if mark_joined:
+                emp_cohorts_joined = set(str(participants_df.loc[participant_idx, "Cohorts Joined"]).split(',') if participants_df.loc[participant_idx, "Cohorts Joined"] else [])
+                if cohort_name not in emp_cohorts_joined:
+                    emp_cohorts_joined.add(cohort_name)
+                    participants_df.loc[participant_idx, "Cohorts Joined"] = ",".join(sorted(list(filter(None, emp_cohorts_joined))))
+                    participant_row_changed = True
+            
+            if participant_row_changed:
+                participants_df.loc[participant_idx, "Last Updated"] = current_time
+                participants_file_updated = True
+        else:
+            st.warning(f"Employee ID {emp_id} not found in participants.csv. Cannot update their cohort status in participants.csv. Employee might be new or migration might be needed if this is unexpected.")
 
     save_table("cohorts", cohorts_df)
-    load_table.clear() # Ensure cache is cleared after saving
-    return added_nominees, added_participants
+    if participants_file_updated:
+        save_table("participants", participants_df)
+    
+    load_table.clear() 
+    return added_nominees_count, added_invited_count, added_joined_count
 
 
 ###############################################################################
@@ -490,328 +819,415 @@ table_key = SECTION_NAMES[section_label]
 if table_key == "manage_participation":
     st.header("Participants")
 
+    participants_df = load_table("participants")
     employees_df = load_table("employees")
     events_df = load_table("events")
-    participants_df = load_table("participants")
 
-    if events_df.empty:
-        st.warning("No events found. Please add events in the 'Events' section first.")
+    if participants_df.empty and not employees_df.empty:
+        st.warning("Participants data is empty. If you have existing employee data, a migration might be pending or may need to be re-triggered. New participants will be created from the Employees table on first interaction if needed by certain operations.")
     elif employees_df.empty:
-        st.warning("No employees found. Please add employees in the 'Employees' section first.")
-    else:
-        # Show existing participation records
-        
-        participants_df_loaded = load_table("participants")
-
-        if not participants_df_loaded.empty:
-            participants_df_for_editor = participants_df_loaded.copy()
-            participants_df_for_editor["Registered"] = participants_df_for_editor.get("Registered", pd.Series(dtype=str)).apply(lambda x: True if x == "Yes" else False)
-            participants_df_for_editor["Participated"] = participants_df_for_editor.get("Participated", pd.Series(dtype=str)).apply(lambda x: True if x == "Yes" else False)
-            participants_df_for_editor["Hosted"] = participants_df_for_editor.get("Hosted", pd.Series(dtype=str)).apply(lambda x: True if x == "Yes" else False)
-
-            column_config_participants = {
+        st.warning("No employees found. Please add employees in the 'Employees' section first. The Participants view is based on the Employees list.")
+    
+    # Main display for participants table and its save logic
+    if not participants_df.empty:
+        column_config_participants_new = {
                 "Standard ID": st.column_config.TextColumn("Standard ID", disabled=True),
                 "Email": st.column_config.TextColumn("Email", disabled=True),
-                "Event ID": st.column_config.TextColumn("Event ID", disabled=True),
-                "Event Name": st.column_config.TextColumn("Event Name", disabled=True),
-                "Event Date": st.column_config.DateColumn("Event Date", format="YYYY-MM-DD", disabled=True),
-                "Registered": st.column_config.CheckboxColumn("Registered", default=False),
-                "Participated": st.column_config.CheckboxColumn("Participated", default=False),
-                "Hosted": st.column_config.CheckboxColumn("Hosted", default=False),
+            "Events Registered": st.column_config.TextColumn("Events Registered (IDs)", help="Managed via \'Update Employee Event Status\' sidebar.", disabled=True),
+            "Events Participated": st.column_config.TextColumn("Events Participated (IDs)", help="Managed via \'Update Employee Event Status\' sidebar.", disabled=True),
+            "Events Hosted": st.column_config.TextColumn("Events Hosted (IDs)", help="Managed via \'Update Employee Event Status\' sidebar.", disabled=True),
+            # "Events Waitlisted": st.column_config.TextColumn("Events Waitlisted (IDs)", help="Managed via \'Update Employee Event Status\' sidebar.", disabled=True), # Removed
+            "Waitlist": st.column_config.CheckboxColumn("Waitlist", help="Is this participant on a general program waitlist?", default=False),
+            "Cohorts Nominated": st.column_config.TextColumn("Cohorts Nominated (Names)", help="Managed via \'Cohorts\' section.", disabled=True),
+            "Cohorts Invited": st.column_config.TextColumn("Cohorts Invited (Names)", help="Managed via \'Cohorts\' section.", disabled=True),
+            "Cohorts Joined": st.column_config.TextColumn("Cohorts Joined (Names)", help="Managed via \'Cohorts\' section.", disabled=True),
+            "Nominated By": st.column_config.TextColumn("Nominated By (Email/ID)", help="Manually enter who nominated this participant for any program/cohort."),
+            "Tags": st.column_config.TextColumn("Tags", help="Comma-separated tags (e.g., Working Group Lead, Offering Support)"),
                 "Last Updated": st.column_config.TextColumn("Last Updated", disabled=True)
             }
 
-            edited_participants_with_bools = st.data_editor(
+        for col_key in FILES["participants"][1]:
+            if col_key not in participants_df.columns:
+                participants_df[col_key] = ""
+        
+        participants_df_for_editor = participants_df[FILES["participants"][1]].copy()
+
+        edited_participants_df = st.data_editor(
                 participants_df_for_editor,
                 num_rows="dynamic",
-                key="editor_participants",
+            key="editor_participants_new",
                 use_container_width=True,
-                column_config=column_config_participants,
+            column_config=column_config_participants_new,
             )
 
-            if st.button("💾  Save", key="save_participants_changes"):
-                current_participants_df_on_save = load_table("participants")
-                current_events_df_on_save = load_table("events")
+        if st.button("💾 Save Participant Details", key="save_participants_details_new"):
+            current_participants_on_disk = load_table("participants")
+            existing_ids_on_disk = set(current_participants_on_disk["Standard ID"])
+            changes_detected = False
+            processed_ids_from_editor = set()
+
+            for idx_edited, edited_row in edited_participants_df.iterrows():
+                std_id = edited_row["Standard ID"]
+                processed_ids_from_editor.add(std_id)
+
+                if not std_id:
+                    st.warning(f"Skipping row {idx_edited + 1} in editor: Standard ID is missing. New participants should ideally be sourced from the Employees table.")
+                    continue
                 
-                participants_to_save_working_copy = current_participants_df_on_save.copy()
-                events_to_save_working_copy = current_events_df_on_save.copy()
-                
-                made_changes_to_participants_file = False
-                made_changes_to_events_file = False
-                current_time_for_save = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                original_row_series_matches = current_participants_on_disk[current_participants_on_disk["Standard ID"] == std_id]
+                row_changed_in_editor = False
 
-                original_statuses_map = {}
-                for _, orig_row in current_participants_df_on_save.iterrows():
-                    original_statuses_map[(orig_row["Standard ID"], orig_row["Event ID"])] = {
-                        "Registered": orig_row.get("Registered", "No"),
-                        "Participated": orig_row.get("Participated", "No"),
-                        "Hosted": orig_row.get("Hosted", "No")
-                    }
-                
-                edited_rows_map = {}
-                for _idx_edit, edited_row in edited_participants_with_bools.iterrows():
-                    std_id = edited_row["Standard ID"]
-                    evt_id = edited_row["Event ID"]
-                    edited_rows_map[(std_id, evt_id)] = edited_row
-
-                    new_reg_status_str = "Yes" if edited_row["Registered"] else "No"
-                    new_part_status_str = "Yes" if edited_row["Participated"] else "No"
-                    new_host_status_str = "Yes" if edited_row["Hosted"] else "No"
-
-                    original_reg = original_statuses_map.get((std_id, evt_id), {}).get("Registered", "No")
-                    original_part = original_statuses_map.get((std_id, evt_id), {}).get("Participated", "No")
-                    original_host = original_statuses_map.get((std_id, evt_id), {}).get("Hosted", "No")
-
-                    match_indices_participants = participants_to_save_working_copy[
-                        (participants_to_save_working_copy["Standard ID"] == std_id) &
-                        (participants_to_save_working_copy["Event ID"] == evt_id)
-                    ].index
-
-                    if not match_indices_participants.empty:
-                        p_save_idx = match_indices_participants[0]
-                        row_changed = False
-                        if participants_to_save_working_copy.loc[p_save_idx, "Registered"] != new_reg_status_str:
-                            participants_to_save_working_copy.loc[p_save_idx, "Registered"] = new_reg_status_str
-                            row_changed = True
-                        if participants_to_save_working_copy.loc[p_save_idx, "Participated"] != new_part_status_str:
-                            participants_to_save_working_copy.loc[p_save_idx, "Participated"] = new_part_status_str
-                            row_changed = True
-                        if participants_to_save_working_copy.loc[p_save_idx, "Hosted"] != new_host_status_str:
-                            participants_to_save_working_copy.loc[p_save_idx, "Hosted"] = new_host_status_str
-                            row_changed = True
-                        
-                        if row_changed:
-                            participants_to_save_working_copy.loc[p_save_idx, "Last Updated"] = current_time_for_save
-                            made_changes_to_participants_file = True
-                        # Check if only the timestamp needs updating due to a flip-flop back to original, but ensure it's marked for saving
-                        elif (new_reg_status_str == original_reg and 
-                              new_part_status_str == original_part and 
-                              new_host_status_str == original_host and 
-                              participants_to_save_working_copy.loc[p_save_idx, "Last Updated"] != current_time_for_save):
-                            # This case is unlikely if row_changed already covers it, but added for completeness
-                            # if the status flipped then flipped back, but we want to ensure last_updated is current if any interaction happened.
-                            # However, the original logic already covers this by checking against original values before setting last_updated.
-                            # The primary goal is: if any of [reg, part, host] differs from original_db_state, update timestamp.
-                            # The current `if row_changed:` correctly captures any actual change from the loaded state to the edited state.
-                            pass # The row_changed logic is sufficient.
-
-                        # More precise check for timestamp update if values changed from their DB original state
-                        if (new_reg_status_str != original_reg or \
-                            new_part_status_str != original_part or \
-                            new_host_status_str != original_host) and not row_changed:
-                            # This condition handles if the editor values are different from DB originals,
-                            # but the `participants_to_save_working_copy` already matched them (e.g. from a previous unsaved edit)
-                            # and now the user is re-saving. We still want to update the timestamp.
-                            # However, the `row_changed` flag already indicates `participants_to_save_working_copy` was modified.
-                            # The most important logic is that `made_changes_to_participants_file` becomes True if any field changed OR if a new row.
-
-                            pass # The current structure should be fine: `row_changed` triggers `made_changes_to_participants_file`
-
-                        # Simpler logic: if any of the statuses changed from their original disk state, update timestamp
-                        # This is implicitly handled if `row_changed` is true.
-                        # The critical part is that `made_changes_to_participants_file` is True if `row_changed` is True.
-
-                    else:
-                        # This means a new row was added in the editor.
-                        st.warning(f"Row for {std_id}/{evt_id} added in editor; full data may be missing if not in source.")
-                        new_row_data = {
-                            "Standard ID": std_id, "Event ID": evt_id,
-                            "Email": employees_df[employees_df["Standard ID"] == std_id]["Email"].iloc[0] if not employees_df[employees_df["Standard ID"] == std_id].empty else "",
-                            "Event Name": events_df[events_df["Event ID"] == evt_id]["Name"].iloc[0] if not events_df[events_df["Event ID"] == evt_id].empty else "",
-                            "Event Date": events_df[events_df["Event ID"] == evt_id]["Date"].iloc[0] if not events_df[events_df["Event ID"] == evt_id].empty else pd.NaT,
-                            "Registered": new_reg_status_str,
-                            "Participated": new_part_status_str,
-                            "Hosted": new_host_status_str,
-                            "Last Updated": current_time_for_save
-                        }
-                        if pd.notna(new_row_data["Event Date"]) and isinstance(new_row_data["Event Date"], pd.Timestamp):
-                           new_row_data["Event Date"] = new_row_data["Event Date"].strftime("%Y-%m-%d")
-                        elif pd.isna(new_row_data["Event Date"]):
-                            new_row_data["Event Date"] = ""
-
-                        participants_to_save_working_copy = pd.concat([participants_to_save_working_copy, pd.DataFrame([new_row_data])], ignore_index=True)
-                        made_changes_to_participants_file = True
-
-                    event_match_indices_events = events_to_save_working_copy[events_to_save_working_copy["Event ID"] == evt_id].index
-                    if not event_match_indices_events.empty:
-                        e_save_idx = event_match_indices_events[0]
-                        
-                        current_event_regs = set(str(events_to_save_working_copy.loc[e_save_idx, "Registrations"]).split(',') if events_to_save_working_copy.loc[e_save_idx, "Registrations"] else [])
-                        event_reg_changed = False
-                        if new_reg_status_str == "Yes" and std_id not in current_event_regs:
-                            current_event_regs.add(std_id)
-                            event_reg_changed = True
-                        elif new_reg_status_str == "No" and std_id in current_event_regs:
-                            current_event_regs.remove(std_id)
-                            event_reg_changed = True
-                        if event_reg_changed:
-                            events_to_save_working_copy.loc[e_save_idx, "Registrations"] = ",".join(sorted(list(filter(None, current_event_regs))))
-                            made_changes_to_events_file = True
-
-                        current_event_parts = set(str(events_to_save_working_copy.loc[e_save_idx, "Participants"]).split(',') if events_to_save_working_copy.loc[e_save_idx, "Participants"] else [])
-                        event_part_changed = False
-                        if new_part_status_str == "Yes" and std_id not in current_event_parts:
-                            current_event_parts.add(std_id)
-                            event_part_changed = True
-                        elif new_part_status_str == "No" and std_id in current_event_parts:
-                            current_event_parts.remove(std_id)
-                            event_part_changed = True
-                        if event_part_changed:
-                            events_to_save_working_copy.loc[e_save_idx, "Participants"] = ",".join(sorted(list(filter(None, current_event_parts))))
-                            made_changes_to_events_file = True
-
-                        current_event_hosts_list = set(str(events_to_save_working_copy.loc[e_save_idx, "Hosted"]).split(',') if events_to_save_working_copy.loc[e_save_idx, "Hosted"] else [])
-                        event_host_changed = False
-                        if new_host_status_str == "Yes" and std_id not in current_event_hosts_list:
-                            current_event_hosts_list.add(std_id)
-                            event_host_changed = True
-                        elif new_host_status_str == "No" and std_id in current_event_hosts_list:
-                            current_event_hosts_list.remove(std_id)
-                            event_host_changed = True
-                        if event_host_changed:
-                            events_to_save_working_copy.loc[e_save_idx, "Hosted"] = ",".join(sorted(list(filter(None, current_event_hosts_list))))
-                            made_changes_to_events_file = True
-                
-                deleted_participant_keys = set(original_statuses_map.keys()) - set(edited_rows_map.keys())
-
-                if deleted_participant_keys:
-                    made_changes_to_participants_file = True
-                    indices_to_drop_from_participants = []
+                if not original_row_series_matches.empty:
+                    original_row_idx = original_row_series_matches.index[0]
+                    # Compare editable fields
+                    if current_participants_on_disk.loc[original_row_idx, "Nominated By"] != edited_row["Nominated By"]:
+                        current_participants_on_disk.loc[original_row_idx, "Nominated By"] = edited_row["Nominated By"]
+                        row_changed_in_editor = True
                     
-                    for p_orig_idx, p_orig_row in participants_to_save_working_copy.iterrows():
-                        if (p_orig_row["Standard ID"], p_orig_row["Event ID"]) in deleted_participant_keys:
-                            indices_to_drop_from_participants.append(p_orig_idx)
+                    # Handle 'Waitlist' checkbox state
+                    current_waitlist_status_str = str(current_participants_on_disk.loc[original_row_idx, "Waitlist"]).lower() == "yes"
+                    editor_waitlist_status_bool = bool(edited_row["Waitlist"])
+                    if current_waitlist_status_str != editor_waitlist_status_bool:
+                        current_participants_on_disk.loc[original_row_idx, "Waitlist"] = "Yes" if editor_waitlist_status_bool else "No"
+                        row_changed_in_editor = True
                     
-                    if indices_to_drop_from_participants:
-                         participants_to_save_working_copy = participants_to_save_working_copy.drop(indices_to_drop_from_participants).reset_index(drop=True)
+                    # Handle 'Tags'
+                    if current_participants_on_disk.loc[original_row_idx, "Tags"] != edited_row["Tags"]:
+                        current_participants_on_disk.loc[original_row_idx, "Tags"] = edited_row["Tags"]
+                        row_changed_in_editor = True
 
-                    for del_std_id, del_evt_id in deleted_participant_keys:
-                        del_event_match_idx = events_to_save_working_copy[events_to_save_working_copy["Event ID"] == del_evt_id].index
-                        if not del_event_match_idx.empty:
-                            e_del_idx = del_event_match_idx[0]
-                            
-                            del_event_regs = set(str(events_to_save_working_copy.loc[e_del_idx, "Registrations"]).split(',') if events_to_save_working_copy.loc[e_del_idx, "Registrations"] else [])
-                            if del_std_id in del_event_regs:
-                                del_event_regs.remove(del_std_id)
-                                events_to_save_working_copy.loc[e_del_idx, "Registrations"] = ",".join(sorted(list(filter(None, del_event_regs))))
-                                made_changes_to_events_file = True
-                            
-                            del_event_parts = set(str(events_to_save_working_copy.loc[e_del_idx, "Participants"]).split(',') if events_to_save_working_copy.loc[e_del_idx, "Participants"] else [])
-                            if del_std_id in del_event_parts:
-                                del_event_parts.remove(del_std_id)
-                                events_to_save_working_copy.loc[e_del_idx, "Participants"] = ",".join(sorted(list(filter(None, del_event_parts))))
-                                made_changes_to_events_file = True
-                                
-                            del_event_hosts = set(str(events_to_save_working_copy.loc[e_del_idx, "Hosted"]).split(',') if events_to_save_working_copy.loc[e_del_idx, "Hosted"] else [])
-                            if del_std_id in del_event_hosts:
-                                del_event_hosts.remove(del_std_id)
-                                events_to_save_working_copy.loc[e_del_idx, "Hosted"] = ",".join(sorted(list(filter(None, del_event_hosts))))
-                                made_changes_to_events_file = True
-                                
-                if made_changes_to_participants_file:
-                    save_table("participants", participants_to_save_working_copy)
-                if made_changes_to_events_file:
-                    save_table("events", events_to_save_working_copy)
-
-                # Check if any changes were persisted to files
-                if made_changes_to_participants_file or made_changes_to_events_file:
-                    st.success("Participation changes saved successfully!")
-                    load_table.clear() 
-                    st.rerun()
+                    if row_changed_in_editor:
+                        current_participants_on_disk.loc[original_row_idx, "Last Updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        changes_detected = True
                 else:
-                    st.info("No changes detected in participation records.")
+                    # New row added in the editor
+                    if not edited_row["Email"] and std_id:
+                        emp_match = employees_df[employees_df["Standard ID"] == std_id]
+                        if not emp_match.empty:
+                            edited_row["Email"] = emp_match["Email"].iloc[0]
+                        else:
+                            st.warning(f"New participant ID {std_id} added in editor, but not found in Employees table to fetch Email.")
+                    
+                    new_row_data = {col: "" for col in FILES["participants"][1]}
+                    for col_name in FILES["participants"][1]:
+                        if col_name in edited_row:
+                            new_row_data[col_name] = edited_row[col_name]
+                    # Ensure 'Waitlist' from editor is correctly converted for new row
+                    new_row_data["Waitlist"] = "Yes" if bool(edited_row.get("Waitlist", False)) else "No"
+                    new_row_data["Tags"] = edited_row.get("Tags", "") # Add Tags for new row
+                    new_row_data["Last Updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    current_participants_on_disk = pd.concat([current_participants_on_disk, pd.DataFrame([new_row_data])], ignore_index=True)
+                    changes_detected = True
+                    st.info(f"Added new participant: {std_id} via editor.")
+
+            deleted_ids = existing_ids_on_disk - processed_ids_from_editor
+            if deleted_ids:
+                current_participants_on_disk = current_participants_on_disk[~current_participants_on_disk["Standard ID"].isin(deleted_ids)]
+                changes_detected = True
+                st.info(f"Removed {len(deleted_ids)} participant(s) via editor: {', '.join(deleted_ids)}")
+
+            if changes_detected:
+                save_table("participants", current_participants_on_disk[FILES["participants"][1]])
+                st.success("Participant details saved successfully!")
+                load_table.clear()
+                st.rerun()
+            else:
+                st.info("No changes detected in participant details.")
+    
+    else: # This else corresponds to `if not participants_df.empty:`
+        st.info("No participant records found. Populate the Employees table first. Participants are derived from Employees.")
+
+    # Sidebar for updating employee event status - This is OUTSIDE the `if not participants_df.empty` block, 
+    # but still within `if table_key == "manage_participation"`
+    with st.sidebar.expander("📝 Update Employee Event Status", expanded=True):
+        st.markdown("### Update Event Status for Employee(s)")
+        
+        if events_df.empty:
+            st.warning("No events found. Please add events in the 'Events' section first.")
+        elif employees_df.empty:
+            st.warning("No employees found. Please add employees in the 'Employees' section first.")
         else:
-            st.info("No participation records found. Add them using the sidebar.")
-
-
-        # Move participant management to sidebar
-        with st.sidebar.expander("📝 Add/Update Participation Records", expanded=True):
-            st.markdown("### Add New Participation Records")
-            
-            # Event Selection
-            event_options = {f"{row['Event ID']} - {row['Name']} ({row['Date'].strftime('%Y-%m-%d')})": row['Event ID']
+            event_options = {f"{row['Event ID']} - {row['Name']} ({pd.to_datetime(row['Date']).strftime('%Y-%m-%d') if pd.notna(row['Date']) else 'No Date'})": row['Event ID']
                              for _, row in events_df.sort_values("Date", ascending=False).iterrows()}
-            selected_event_display = st.selectbox(
+            
+            selected_event_id = None # Initialize selected_event_id
+            if not event_options:
+                 st.info("No events available to select.")
+            else:
+                selected_event_display = st.selectbox(
                 "Select Event",
                 options=list(event_options.keys())
             )
             selected_event_id = event_options.get(selected_event_display)
 
             st.divider()
-
-            # Input Employee IDs/Emails
             st.markdown("#### Select Employees")
             employee_ids_to_process = []
-            invalid_inputs_detected = []
 
             tab_paste, tab_select, tab_upload = st.tabs(["Paste List", "Select from List", "Upload File"])
 
             with tab_paste:
-                pasted_list = st.text_area("Paste Standard IDs or Emails (one per line)", key="participants_paste")
+                pasted_list = st.text_area("Paste Standard IDs or Emails (one per line)", key="participants_paste_new")
                 if pasted_list:
-                    employee_ids_to_process, invalid_inputs_detected = get_employee_ids_from_input(pasted_list, employees_df)
-                    st.write(f"Found {len(employee_ids_to_process)} valid employee(s).")
-                    if invalid_inputs_detected:
-                        st.warning(f"Could not find/validate: {', '.join(invalid_inputs_detected)}")
+                    valid_ids, invalid_inputs = get_employee_ids_from_input(pasted_list, employees_df)
+                    if valid_ids: 
+                        st.write(f"Found {len(valid_ids)} valid employee(s).")
+                        employee_ids_to_process.extend(valid_ids) # Use extend for multiple sources
+                    if invalid_inputs: 
+                        st.warning(f"Could not find/validate: {', '.join(invalid_inputs)}")
 
             with tab_select:
                 employee_display_options = [f"{row['Standard ID']} - {row['Email']}"
                                             for _, row in employees_df.iterrows()]
-                selected_employees = st.multiselect(
+                selected_employees_multi = st.multiselect(
                     "Select Employees",
                     options=employee_display_options,
-                    key="participants_multiselect"
+                    key="participants_multiselect_new"
                 )
-                if selected_employees:
-                    employee_ids_to_process = [opt.split(' - ')[0] for opt in selected_employees]
+                if selected_employees_multi:
+                    ids_from_select = [opt.split(' - ')[0] for opt in selected_employees_multi]
+                    # Add only if not already added from paste tab (to avoid duplicates if user uses multiple tabs)
+                    for item_id in ids_from_select:
+                        if item_id not in employee_ids_to_process:
+                            employee_ids_to_process.append(item_id)
 
             with tab_upload:
-                uploaded_file = st.file_uploader("Upload .txt or .csv (one ID/email per line)", type=["txt", "csv"], key="participants_upload")
+                uploaded_file = st.file_uploader("Upload .txt or .csv (one ID/email per line)", type=["txt", "csv"], key="participants_upload_new")
                 if uploaded_file is not None:
                     stringio = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
                     file_content = stringio.read()
-                    employee_ids_to_process, invalid_inputs_detected = get_employee_ids_from_input(file_content, employees_df)
-                    st.write(f"Found {len(employee_ids_to_process)} valid employee(s).")
-                    if invalid_inputs_detected:
-                        st.warning(f"Could not find/validate: {', '.join(invalid_inputs_detected)}")
+                    valid_ids_file, invalid_inputs_file = get_employee_ids_from_input(file_content, employees_df)
+                    if valid_ids_file: 
+                        st.write(f"Found {len(valid_ids_file)} valid employee(s) from file.")
+                        for item_id in valid_ids_file:
+                             if item_id not in employee_ids_to_process:
+                                employee_ids_to_process.append(item_id)
+                    if invalid_inputs_file: 
+                        st.warning(f"Could not find/validate from file: {', '.join(invalid_inputs_file)}")
+            
+            # Remove duplicates just in case, preserving order as much as possible
+            if employee_ids_to_process:
+                employee_ids_to_process = sorted(list(set(employee_ids_to_process)), key=employee_ids_to_process.index)
 
             st.divider()
-
-            # Select Participation Type
-            st.markdown("#### Set Participation Status")
-            mark_registered = st.checkbox("Registered")
-            mark_participated = st.checkbox("Participated")
-            mark_hosted = st.checkbox("Hosted")
-
+            st.markdown("#### Set Participation Status for Selected Event")
+            
+            # Stack checkboxes vertically instead of in columns
+            set_registered = st.checkbox("Registered", key="set_registered_event_new_key")
+            set_participated = st.checkbox("Participated", key="set_participated_event_new_key")
+            set_hosted = st.checkbox("Hosted", key="set_hosted_event_new_key")
+            # Removed the caption
             st.divider()
 
-            # Update Button
-            if st.button("Update Participation", disabled=(not selected_event_id or not employee_ids_to_process or (not mark_registered and not mark_participated and not mark_hosted))):
-                added_reg, added_part, added_host = update_event_participation(
-                    selected_event_id,
+            update_button_disabled = not (selected_event_id and employee_ids_to_process and (set_registered or set_participated or set_hosted)) # Button enabled if any action is true
+            
+            if st.button("Update Event Status", disabled=update_button_disabled, key="update_event_status_button_new_key"):
+                st.write(f"Processing updates for {len(employee_ids_to_process)} employee(s) for event {selected_event_id}: Adding Registered={set_registered}, Adding Participated={set_participated}, Adding Hosted={set_hosted}")
+
+                newly_added_reg, newly_added_part, newly_added_host = update_employee_event_status(
                     employee_ids_to_process,
-                    mark_registered,
-                    mark_participated,
-                    mark_hosted
+                    selected_event_id,
+                    mark_registered=set_registered,
+                    mark_participated=set_participated,
+                    mark_hosted=set_hosted
                 )
-                success_msgs = []
-                if mark_registered:
-                     success_msgs.append(f"Added {added_reg} new registration(s).")
-                if mark_participated:
-                    success_msgs.append(f"Added {added_part} new participation record(s).")
-                if mark_hosted:
-                    success_msgs.append(f"Marked {added_host} as host(s).")
+                
+                msg_parts = []
+                if set_registered and newly_added_reg > 0: msg_parts.append(f"{newly_added_reg} newly registered.")
+                elif set_registered: msg_parts.append(f"Registrations: No new additions (already registered or list unchanged).")
+                
+                if set_participated and newly_added_part > 0: msg_parts.append(f"{newly_added_part} newly participated.")
+                elif set_participated: msg_parts.append(f"Participation: No new additions (already participated or list unchanged).")
 
-                if success_msgs:
-                    st.success(f"Successfully updated event '{selected_event_display}'. {' '.join(success_msgs)}")
+                if set_hosted and newly_added_host > 0: msg_parts.append(f"{newly_added_host} newly marked as hosted.")
+                elif set_hosted: msg_parts.append(f"Hosted: No new additions (already marked as host or list unchanged).")
+                
+                if not msg_parts and not (set_registered or set_participated or set_hosted):
+                     # This case should ideally be prevented by the disabled button logic
+                     msg_parts.append("No actions selected.")
+                elif not msg_parts: # Some action was selected, but no one was newly added
+                    msg_parts.append("No new individuals were added to the selected lists (they may have already been on them).")
+
+                event_display_str = selected_event_display if selected_event_id else "N/A" # Construct safely
+                final_message = f"Event status update processed for {len(employee_ids_to_process)} employee(s) for event '{event_display_str}'."
+                if msg_parts:
+                    final_message += " Details: " + ' '.join(msg_parts)
+                else: # Should ideally not happen with current logic if button was enabled
+                    final_message += " No specific actions were performed or needed." 
+                
+                st.success(final_message)
+                st.rerun()
+
+    # New expander for bulk updating participant waitlist status and tags
+    with st.sidebar.expander("📋 Update Participant Details", expanded=False):
+        st.markdown("### Update Waitlist Status & Tags")
+        
+        if employees_df.empty:
+            st.warning("No employees found. Please add employees in the 'Employees' section first.")
+        else:
+            st.markdown("#### Select Employees")
+            bulk_employee_ids = []
+
+            bulk_tab_paste, bulk_tab_select, bulk_tab_upload = st.tabs(["Paste List", "Select from List", "Upload File"])
+
+            with bulk_tab_paste:
+                bulk_pasted_list = st.text_area("Paste Standard IDs or Emails (one per line)", key="bulk_participants_paste")
+                if bulk_pasted_list:
+                    valid_ids, invalid_inputs = get_employee_ids_from_input(bulk_pasted_list, employees_df)
+                    if valid_ids:
+                        st.write(f"Found {len(valid_ids)} valid employee(s).")
+                        bulk_employee_ids.extend(valid_ids)
+                    if invalid_inputs:
+                        st.warning(f"Could not find/validate: {', '.join(invalid_inputs)}")
+
+            with bulk_tab_select:
+                employee_display_options = [f"{row['Standard ID']} - {row['Email']}"
+                                           for _, row in employees_df.iterrows()]
+                bulk_selected_employees = st.multiselect(
+                    "Select Employees",
+                    options=employee_display_options,
+                    key="bulk_participants_multiselect"
+                )
+                if bulk_selected_employees:
+                    ids_from_select = [opt.split(' - ')[0] for opt in bulk_selected_employees]
+                    for item_id in ids_from_select:
+                        if item_id not in bulk_employee_ids:
+                            bulk_employee_ids.append(item_id)
+
+            with bulk_tab_upload:
+                bulk_uploaded_file = st.file_uploader("Upload .txt or .csv (one ID/email per line)", type=["txt", "csv"], key="bulk_participants_upload")
+                if bulk_uploaded_file is not None:
+                    stringio = io.StringIO(bulk_uploaded_file.getvalue().decode("utf-8"))
+                    file_content = stringio.read()
+                    valid_ids_file, invalid_inputs_file = get_employee_ids_from_input(file_content, employees_df)
+                    if valid_ids_file:
+                        st.write(f"Found {len(valid_ids_file)} valid employee(s) from file.")
+                        for item_id in valid_ids_file:
+                            if item_id not in bulk_employee_ids:
+                                bulk_employee_ids.append(item_id)
+                    if invalid_inputs_file:
+                        st.warning(f"Could not find/validate from file: {', '.join(invalid_inputs_file)}")
+            
+            # Remove duplicates just in case, preserving order as much as possible
+            if bulk_employee_ids:
+                bulk_employee_ids = sorted(list(set(bulk_employee_ids)), key=bulk_employee_ids.index)
+                st.write(f"**Total unique employees selected:** {len(bulk_employee_ids)}")
+
+            st.divider()
+            st.markdown("#### Set Details to Update")
+            
+            # Waitlist status options
+            waitlist_action = st.radio(
+                "Update Waitlist Status:",
+                ["No Change", "Add to Waitlist", "Remove from Waitlist"],
+                index=0,
+                key="waitlist_action"
+            )
+            
+            # Tags input
+            tags_to_add = st.text_input(
+                "Add Tags (comma-separated):",
+                help="These tags will be added to existing tags for each employee",
+                key="tags_to_add"
+            )
+            
+            st.divider()
+            
+            # Update button
+            update_details_disabled = not (bulk_employee_ids and (waitlist_action != "No Change" or tags_to_add.strip()))
+            
+            if st.button("Update Participant Details", disabled=update_details_disabled, key="update_participant_details_button"):
+                participants_df = load_table("participants")
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                updates_made = 0
+                waitlist_updates = 0
+                tag_updates = 0
+                
+                # Process each employee
+                for emp_id in bulk_employee_ids:
+                    # Find or create participant entry
+                    participant_indices = participants_df[participants_df["Standard ID"] == emp_id].index
+                    participant_idx = -1
+                    
+                    if participant_indices.empty:
+                        # Create new participant record
+                        emp_details = employees_df[employees_df["Standard ID"] == emp_id]
+                        email = emp_details["Email"].iloc[0] if not emp_details.empty else ""
+                        new_row_data = {col: "" for col in participants_df.columns}
+                        new_row_data["Standard ID"] = emp_id
+                        new_row_data["Email"] = email
+                        new_row_data["Waitlist"] = "No"
+                        
+                        participants_df = pd.concat([participants_df, pd.DataFrame([new_row_data])], ignore_index=True)
+                        participant_idx = participants_df[participants_df["Standard ID"] == emp_id].index[0]
+                        st.info(f"Created new entry in participants.csv for {emp_id}")
+                    else:
+                        participant_idx = participant_indices[0]
+                    
+                    row_updated = False
+                    
+                    # Update waitlist status if requested
+                    if waitlist_action != "No Change":
+                        new_waitlist_status = "Yes" if waitlist_action == "Add to Waitlist" else "No"
+                        current_status = str(participants_df.loc[participant_idx, "Waitlist"]).strip().lower()
+                        
+                        # Only update if changing from current state
+                        if (new_waitlist_status.lower() == "yes" and current_status != "yes") or \
+                           (new_waitlist_status.lower() == "no" and current_status == "yes"):
+                            participants_df.loc[participant_idx, "Waitlist"] = new_waitlist_status
+                            row_updated = True
+                            waitlist_updates += 1
+                    
+                    # Add tags if provided
+                    if tags_to_add.strip():
+                        # Get current tags, split, and ensure we have a clean list
+                        current_tags = str(participants_df.loc[participant_idx, "Tags"])
+                        current_tag_list = [tag.strip() for tag in current_tags.split(",") if tag.strip()]
+                        
+                        # Get new tags, split, and ensure we have a clean list
+                        new_tag_list = [tag.strip() for tag in tags_to_add.split(",") if tag.strip()]
+                        
+                        # Add new tags if they don't already exist
+                        added_tags = False
+                        for new_tag in new_tag_list:
+                            if new_tag not in current_tag_list:
+                                current_tag_list.append(new_tag)
+                                added_tags = True
+                        
+                        if added_tags:
+                            # Update the Tags field with the combined list
+                            participants_df.loc[participant_idx, "Tags"] = ", ".join(current_tag_list)
+                            row_updated = True
+                            tag_updates += 1
+                    
+                    # Update timestamp if any changes were made
+                    if row_updated:
+                        participants_df.loc[participant_idx, "Last Updated"] = current_time
+                        updates_made += 1
+                
+                # Save changes if any were made
+                if updates_made > 0:
+                    save_table("participants", participants_df)
+                    
+                    success_msg = []
+                    if waitlist_action != "No Change":
+                        status_text = "added to" if waitlist_action == "Add to Waitlist" else "removed from"
+                        success_msg.append(f"{waitlist_updates} participant(s) {status_text} waitlist")
+                    
+                    if tags_to_add.strip():
+                        success_msg.append(f"{tag_updates} participant(s) had tags added")
+                    
+                    st.success(f"Successfully updated {updates_made} participant(s). {' and '.join(success_msg)}.")
+                    load_table.clear()
                     st.rerun()
                 else:
-                    st.info("No changes made (employees might already have the selected status).")
+                    st.info("No updates were needed. Participants may already have the specified waitlist status or tags.")
 
 # --- Other Sections (Employees, Workshops, Cohorts, Events) ---
 else:
     if table_key == "events":
-        load_table.clear() # Ensure fresh load for events, especially after CSV changes
+        load_table.clear() 
     df = load_table(table_key)
     st.header(section_label)
 
@@ -883,6 +1299,7 @@ else:
             "Registrations": st.column_config.TextColumn("Registered", help="Employee IDs registered (updated via Manage Participation).", disabled=True),
             "Participants": st.column_config.TextColumn("Participated", help="Employee IDs participated (updated via Manage Participation).", disabled=True),
             "Hosted": st.column_config.TextColumn("Hosted", help="Employee IDs hosted (updated via Manage Participation).", disabled=True),
+            # "Waitlisted": st.column_config.TextColumn("Waitlisted IDs", help="Employee IDs waitlisted (updated via Manage Participation).", disabled=True), # Removed
             "Event ID": st.column_config.TextColumn("Event ID", disabled=True),
             "Date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
             "Category": st.column_config.SelectboxColumn("Category", options=list(EVENT_CATEGORIES.keys()), required=True),
@@ -931,8 +1348,9 @@ else:
                         "Event ID": event_id, "Name": event_name, 
                         "Date": pd.to_datetime(event_date.strftime("%Y-%m-%d"), errors='coerce'),
                         "Category": event_category, "Workshop": selected_workshop_id,
-                        "Hosted": "",  # Initially empty, will be populated via Manage Participation
+                        "Hosted": "",  
                         "Registrations": "", "Participants": ""
+                        # "Waitlisted": "" # Removed
                     }])
                     st.session_state['newly_added_event'] = new_event
                     st.rerun()
@@ -952,8 +1370,9 @@ else:
         employees_df = load_table("employees") # Needed for employee selection
 
         column_config_cohorts = {
-            "Nominees": st.column_config.TextColumn("Nominees", help="Comma-separated Standard IDs.", disabled=True),
-            "Participants": st.column_config.TextColumn("Participants", help="Comma-separated Standard IDs.", disabled=True),
+            "Nominated": st.column_config.TextColumn("Nominated", help="Comma-separated Standard IDs.", disabled=True),
+            "Invited": st.column_config.TextColumn("Invited", help="Comma-separated Standard IDs.", disabled=True),
+            "Joined": st.column_config.TextColumn("Joined", help="Comma-separated Standard IDs.", disabled=True),
             "Date Started": st.column_config.DateColumn("Date Started", format="YYYY-MM-DD", required=True)
         }
         edited_df = st.data_editor(
@@ -997,8 +1416,9 @@ else:
                         new_cohort = pd.DataFrame([{
                             "Name": cohort_name,
                             "Date Started": pd.to_datetime(cohort_date.strftime("%Y-%m-%d"), errors='coerce'),
-                            "Nominees": "",
-                            "Participants": ""
+                            "Nominated": "",
+                            "Invited": "",
+                            "Joined": ""
                         }])
                         st.session_state['newly_added_cohort'] = new_cohort
                         st.rerun()
@@ -1041,13 +1461,15 @@ else:
                 with input_method[1]: # Select from List
                     employee_display_options = [f"{row['Standard ID']} - {row['Email']}"
                                                 for _, row in employees_df.iterrows()]
-                    selected_employees = st.multiselect(
+                    selected_employees_from_multiselect_cohorts = st.multiselect(
                         "Select Employees",
                         options=employee_display_options,
-                        key="cohort_multiselect"
+                        key="cohort_multiselect_input"
                     )
-                    if selected_employees:
-                        employee_ids_to_process = [opt.split(' - ')[0] for opt in selected_employees]
+                    if selected_employees_from_multiselect_cohorts:
+                        # If employee_ids_to_process is empty (i.e., not filled by paste/upload), then use these.
+                        if not employee_ids_to_process:
+                            employee_ids_to_process = [opt.split(' - ')[0] for opt in selected_employees_from_multiselect_cohorts]
 
                 with input_method[2]: # Upload File
                     uploaded_file = st.file_uploader("Upload .txt or .csv (one ID/email per line)", type=["txt", "csv"], key="cohort_upload")
@@ -1063,24 +1485,28 @@ else:
 
                 # Select Membership Type
                 st.markdown("#### Set Membership Status")
-                mark_nominated = st.checkbox("Nominees")
-                mark_participant = st.checkbox("Participants")
+                mark_nominated = st.checkbox("Nominated")
+                mark_invited = st.checkbox("Invited")
+                mark_joined = st.checkbox("Joined")
 
                 st.divider()
 
                 # Update Button
-                if st.button("Update Cohort Membership", disabled=(not selected_cohort_name or not employee_ids_to_process or (not mark_nominated and not mark_participant))):
-                    added_nom, added_part = update_cohort_membership(
+                if st.button("Update Cohort Membership", disabled=(not selected_cohort_name or not employee_ids_to_process or (not mark_nominated and not mark_invited and not mark_joined))):
+                    added_nom, added_invited, added_joined = update_cohort_membership(
                         selected_cohort_name,
                         employee_ids_to_process,
                         mark_nominated,
-                        mark_participant
+                        mark_invited,
+                        mark_joined
                     )
                     success_msgs = []
                     if mark_nominated:
                          success_msgs.append(f"Added {added_nom} new nomination(s).")
-                    if mark_participant:
-                        success_msgs.append(f"Added {added_part} new participant(s).")
+                    if mark_invited:
+                         success_msgs.append(f"Added {added_invited} new invitation(s).")
+                    if mark_joined:
+                        success_msgs.append(f"Added {added_joined} new member(s) to cohort.")
 
                     if success_msgs:
                         st.success(f"Successfully updated cohort '{selected_cohort_name}'. {' '.join(success_msgs)}")
