@@ -133,7 +133,7 @@ FILES = {
     ]),
     "cohorts": ("cohorts.csv", [
         "Name", "Date Started",
-        "Nominated",        # Comma-separated Standard IDs
+        "Nominees",        # Comma-separated Standard IDs
         "Participants"      # Comma-separated Standard IDs
     ]),
     "events": ("events.csv", [
@@ -417,7 +417,7 @@ def update_event_participation(event_id: str, employee_ids: list[str], mark_regi
 
 
 def update_cohort_membership(cohort_name: str, employee_ids: list[str], mark_nominated: bool, mark_participant: bool) -> tuple[int, int]:
-    """Adds employee IDs to the Nominated and/or Participants fields for a given cohort."""
+    """Adds employee IDs to the Nominees and/or Participants fields for a given cohort."""
     if not cohort_name or not employee_ids or (not mark_nominated and not mark_participant):
         return 0, 0 # Nothing to do
 
@@ -430,16 +430,16 @@ def update_cohort_membership(cohort_name: str, employee_ids: list[str], mark_nom
         return 0, 0
 
     idx = cohort_index[0]
-    added_nominated = 0
+    added_nominees = 0
     added_participants = 0
 
     # Update cohorts.csv
     if mark_nominated:
-        current_nominated = set(cohorts_df.loc[idx, "Nominated"].split(',') if cohorts_df.loc[idx, "Nominated"] else [])
-        initial_len = len(current_nominated)
-        current_nominated.update(employee_ids)
-        cohorts_df.loc[idx, "Nominated"] = ",".join(sorted(list(current_nominated)))
-        added_nominated = len(current_nominated) - initial_len
+        current_nominees = set(cohorts_df.loc[idx, "Nominees"].split(',') if cohorts_df.loc[idx, "Nominees"] else [])
+        initial_len = len(current_nominees)
+        current_nominees.update(employee_ids)
+        cohorts_df.loc[idx, "Nominees"] = ",".join(sorted(list(current_nominees)))
+        added_nominees = len(current_nominees) - initial_len
 
     if mark_participant:
         current_participants = set(cohorts_df.loc[idx, "Participants"].split(',') if cohorts_df.loc[idx, "Participants"] else [])
@@ -450,7 +450,7 @@ def update_cohort_membership(cohort_name: str, employee_ids: list[str], mark_nom
 
     save_table("cohorts", cohorts_df)
     load_table.clear() # Ensure cache is cleared after saving
-    return added_nominated, added_participants
+    return added_nominees, added_participants
 
 
 ###############################################################################
@@ -952,7 +952,7 @@ else:
         employees_df = load_table("employees") # Needed for employee selection
 
         column_config_cohorts = {
-            "Nominated": st.column_config.TextColumn("Nominated", help="Comma-separated Standard IDs.", disabled=True),
+            "Nominees": st.column_config.TextColumn("Nominees", help="Comma-separated Standard IDs.", disabled=True),
             "Participants": st.column_config.TextColumn("Participants", help="Comma-separated Standard IDs.", disabled=True),
             "Date Started": st.column_config.DateColumn("Date Started", format="YYYY-MM-DD", required=True)
         }
@@ -997,7 +997,7 @@ else:
                         new_cohort = pd.DataFrame([{
                             "Name": cohort_name,
                             "Date Started": pd.to_datetime(cohort_date.strftime("%Y-%m-%d"), errors='coerce'),
-                            "Nominated": "",
+                            "Nominees": "",
                             "Participants": ""
                         }])
                         st.session_state['newly_added_cohort'] = new_cohort
@@ -1063,8 +1063,8 @@ else:
 
                 # Select Membership Type
                 st.markdown("#### Set Membership Status")
-                mark_nominated = st.checkbox("Nominated")
-                mark_participant = st.checkbox("Participated")
+                mark_nominated = st.checkbox("Nominees")
+                mark_participant = st.checkbox("Participants")
 
                 st.divider()
 
