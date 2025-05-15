@@ -10,6 +10,7 @@ A Streamlit-based application to manage and track participation in an AI Adoptio
 - **Cohorts Management**: Create and manage cohorts of employees
 - **Participation Tracking**: Record and track employee registration and participation in events
 - **Flexible Column Display**: Toggle visibility of additional employee data columns in the UI.
+- **Version Control & Data Safety**: Automatic schema validation, backups, and migrations for safe updates
 
 ## Project Structure
 
@@ -20,6 +21,8 @@ A Streamlit-based application to manage and track participation in an AI Adoptio
   - `events.csv`: Event instances
   - `cohorts.csv`: Employee cohorts
   - `participants.csv`: Detailed participation records
+- `backups/`: Directory for automatic and manual backups (created on first run)
+- `version.json`: Tracks schema version and migration status
 
 ## Requirements
 
@@ -86,6 +89,23 @@ A Streamlit-based application to manage and track participation in an AI Adoptio
 - Upload lists of participants by ID or email.
 - Mark employees as registered and/or participated.
 - View and edit participation history.
+
+## Data Safety & Version Control
+
+### Schema Validation
+- The app automatically validates CSV schemas against expected structure
+- Missing columns are automatically added with default values
+- Warning messages inform users about any automatic schema fixes
+
+### Automatic Backups
+- Backups are automatically created before applying migrations
+- Use the "Data Management" sidebar to create manual backups
+- Restore from previous backups if needed
+
+### Schema Migrations
+- The app tracks schema versions to ensure compatibility
+- When updating to a new version, necessary data migrations are applied automatically
+- Current schema version is displayed in the sidebar
 
 ## Data Storage
 

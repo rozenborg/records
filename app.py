@@ -3,6 +3,111 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 import io # Needed for file uploads
+import shutil # For file operations
+import json # For version control
+
+###############################################################################
+# Version Control & Migration
+###############################################################################
+APP_VERSION = "1.0.0"  # Current app version
+VERSION_FILE = "version.json"  # Stores schema version info
+BACKUP_DIR = "backups"  # Directory for data backups
+
+def get_current_schema_version():
+    """Get the current schema version from the version file."""
+    if os.path.exists(VERSION_FILE):
+        try:
+            with open(VERSION_FILE, 'r') as f:
+                version_data = json.load(f)
+                return version_data.get('schema_version', '0.0.0')
+        except (json.JSONDecodeError, IOError):
+            return '0.0.0'
+    return '0.0.0'
+
+def update_schema_version(new_version):
+    """Update the schema version in the version file."""
+    version_data = {'schema_version': new_version, 'updated_at': datetime.now().isoformat()}
+    with open(VERSION_FILE, 'w') as f:
+        json.dump(version_data, f)
+
+def create_backup():
+    """Create a timestamped backup of all data files."""
+    if not os.path.exists(DATA_DIR):
+        return False
+    
+    if not os.path.exists(BACKUP_DIR):
+        os.makedirs(BACKUP_DIR)
+    
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    backup_path = os.path.join(BACKUP_DIR, f"backup_{timestamp}")
+    os.makedirs(backup_path, exist_ok=True)
+    
+    # Copy all CSV files to the backup directory
+    for file_name in os.listdir(DATA_DIR):
+        if file_name.endswith('.csv'):
+            source_path = os.path.join(DATA_DIR, file_name)
+            dest_path = os.path.join(backup_path, file_name)
+            shutil.copy2(source_path, dest_path)
+    
+    return backup_path
+
+def run_migrations(from_version, to_version):
+    """Run database migrations from one version to another."""
+    # Define migrations as a dictionary with from_version -> to_version keys and migration functions as values
+    migrations = {
+        '0.0.0->1.0.0': migrate_from_0_to_1
+    }
+    
+    # Execute appropriate migration based on version transition
+    migration_key = f'{from_version}->{to_version}'
+    if migration_key in migrations:
+        # Create backup before running migrations
+        backup_path = create_backup()
+        st.info(f"Created backup at {backup_path} before applying migrations")
+        
+        # Run the migration
+        migrations[migration_key]()
+        update_schema_version(to_version)
+        st.success(f"Successfully migrated from v{from_version} to v{to_version}")
+        return True
+    
+    # If we're on a new installation (version 0.0.0), just update the version
+    if from_version == '0.0.0':
+        update_schema_version(to_version)
+        return True
+        
+    return False
+
+# Example migration function
+def migrate_from_0_to_1():
+    """Migration from version 0.0.0 to 1.0.0."""
+    try:
+        # Add "Last Updated" column to participants.csv if it doesn't exist
+        if os.path.exists(os.path.join(DATA_DIR, "participants.csv")):
+            df = pd.read_csv(os.path.join(DATA_DIR, "participants.csv"))
+            if "Last Updated" not in df.columns:
+                df["Last Updated"] = ""
+                df.to_csv(os.path.join(DATA_DIR, "participants.csv"), index=False)
+                st.info("Added 'Last Updated' column to participants.csv")
+        
+        # Add "Hosted" field to participants.csv if it doesn't exist
+        if os.path.exists(os.path.join(DATA_DIR, "participants.csv")):
+            df = pd.read_csv(os.path.join(DATA_DIR, "participants.csv"))
+            if "Hosted" not in df.columns:
+                df["Hosted"] = "No"  # Default all existing records to "No"
+                df.to_csv(os.path.join(DATA_DIR, "participants.csv"), index=False)
+                st.info("Added 'Hosted' column to participants.csv")
+        
+        # Add "Hosted" field to events.csv if it doesn't exist
+        if os.path.exists(os.path.join(DATA_DIR, "events.csv")):
+            df = pd.read_csv(os.path.join(DATA_DIR, "events.csv"))
+            if "Hosted" not in df.columns:
+                df["Hosted"] = ""  # Empty list of hosted IDs
+                df.to_csv(os.path.join(DATA_DIR, "events.csv"), index=False)
+                st.info("Added 'Hosted' column to events.csv")
+    except Exception as e:
+        st.error(f"Migration failed: {str(e)}")
+        raise
 
 ###############################################################################
 # Configuration
@@ -63,11 +168,27 @@ def ensure_data_dir() -> None:
     """Create data directory if it doesn't exist."""
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
+    if not os.path.exists(BACKUP_DIR):
+        os.makedirs(BACKUP_DIR)
 
 def _path_for(key: str) -> str:
     """Absolute CSV path for a given logical table key."""
     filename, _ = FILES[key]
     return os.path.join(DATA_DIR, filename)
+
+def validate_and_fix_csv_schema(key: str, df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
+    """Validate CSV against expected schema and fix if necessary."""
+    canonical_cols = FILES[key][1][:]  # Make a copy of expected columns
+    fixed = False
+    
+    # Check if all expected columns exist
+    for col in canonical_cols:
+        if col not in df.columns:
+            df[col] = ""
+            fixed = True
+            st.warning(f"Added missing column '{col}' to {key} table")
+    
+    return df, fixed
 
 
 @st.cache_data(ttl=3600)  # Cache for 1 hour
@@ -111,6 +232,16 @@ def load_table(key: str) -> pd.DataFrame:
             df["Date"] = pd.to_datetime(df["Date"], errors='coerce')
         elif key == "cohorts" and "Date Started" in df.columns:
             df["Date Started"] = pd.to_datetime(df["Date Started"], errors='coerce')
+
+        # Validate and fix schema if necessary
+        df, was_fixed = validate_and_fix_csv_schema(key, df)
+        if was_fixed:
+            # If we had to fix the schema, save the fixed file
+            df_to_save = df.copy()
+            if key == "employees":
+                # If we were to save with external names, this is where we'd rename "Email" back
+                df_to_save = df_to_save.rename(columns={"Email": "Work Email Address"})
+            df_to_save.to_csv(path, index=False)
 
     else: # File does not exist, create an empty one with canonical columns
         df = pd.DataFrame(columns=canonical_cols) 
@@ -330,6 +461,15 @@ st.title("AI Adoption Program Tracker")
 
 ensure_data_dir()
 
+# Check schema version and run migrations if needed
+current_schema_version = get_current_schema_version()
+if current_schema_version != APP_VERSION:
+    st.info(f"Checking for schema updates (current: v{current_schema_version}, latest: v{APP_VERSION})...")
+    migration_result = run_migrations(current_schema_version, APP_VERSION)
+    if not migration_result and current_schema_version != '0.0.0':
+        st.warning(f"No migration path found from v{current_schema_version} to v{APP_VERSION}. " +
+                  "The app will try to continue, but you may encounter issues.")
+
 SECTION_NAMES = {
     "Participants": "manage_participation",
     "Events": "events",
@@ -360,7 +500,6 @@ if table_key == "manage_participation":
         st.warning("No employees found. Please add employees in the 'Employees' section first.")
     else:
         # Show existing participation records
-        st.markdown("### Participation Records")
         
         participants_df_loaded = load_table("participants")
 
@@ -454,7 +593,6 @@ if table_key == "manage_participation":
                             # However, the original logic already covers this by checking against original values before setting last_updated.
                             # The primary goal is: if any of [reg, part, host] differs from original_db_state, update timestamp.
                             # The current `if row_changed:` correctly captures any actual change from the loaded state to the edited state.
-                            # Let's refine the condition for timestamp update to be more explicit about original state comparison.
                             pass # The row_changed logic is sufficient.
 
                         # More precise check for timestamp update if values changed from their DB original state
@@ -466,6 +604,7 @@ if table_key == "manage_participation":
                             # and now the user is re-saving. We still want to update the timestamp.
                             # However, the `row_changed` flag already indicates `participants_to_save_working_copy` was modified.
                             # The most important logic is that `made_changes_to_participants_file` becomes True if any field changed OR if a new row.
+
                             pass # The current structure should be fine: `row_changed` triggers `made_changes_to_participants_file`
 
                         # Simpler logic: if any of the statuses changed from their original disk state, update timestamp
@@ -1015,3 +1154,44 @@ else:
     # Context-specific helpers (Only for non-participation sections)
     # ---------------------------------------------------------------------------
     # Removed Quick Category Tagger for Employees section
+
+# Add version info and admin controls at the very bottom of the sidebar
+st.sidebar.divider()
+# Display version info in a small, subtle way
+st.sidebar.caption(f"App Version: v{APP_VERSION}")
+
+# Add backup controls in a collapsed "System" expander at the bottom
+with st.sidebar.expander("⚙️ System", expanded=False):
+    st.markdown("### Data Backup & Restore")
+    if st.button("Create Backup Now", key="create_backup_btn"):
+        backup_path = create_backup()
+        if backup_path:
+            st.success(f"Backup created at: {backup_path}")
+        else:
+            st.error("Failed to create backup")
+    
+    # List available backups
+    if os.path.exists(BACKUP_DIR):
+        backups = [d for d in os.listdir(BACKUP_DIR) if os.path.isdir(os.path.join(BACKUP_DIR, d))]
+        if backups:
+            backups.sort(reverse=True)  # Most recent first
+            selected_backup = st.selectbox("Available Backups", options=backups, key="backup_select")
+            if st.button("Restore Selected Backup", key="restore_backup_btn"):
+                backup_path = os.path.join(BACKUP_DIR, selected_backup)
+                # Confirm before restoring
+                confirm = st.checkbox("I understand this will overwrite current data", key="confirm_restore")
+                if confirm and st.button("Confirm Restore", key="confirm_restore_btn"):
+                    # Create a backup of current data before restoring
+                    create_backup()
+                    # Copy files from backup to data directory
+                    for file_name in os.listdir(backup_path):
+                        if file_name.endswith('.csv'):
+                            source_path = os.path.join(backup_path, file_name)
+                            dest_path = os.path.join(DATA_DIR, file_name)
+                            shutil.copy2(source_path, dest_path)
+                    st.success("Backup restored successfully!")
+                    # Clear cache to reload data
+                    load_table.clear()
+                    st.rerun()
+        else:
+            st.info("No backups available")
