@@ -860,7 +860,7 @@ if table_key == "manage_participation":
             column_config=column_config_participants_new,
             )
 
-        if st.button("💾 Save Participant Details", key="save_participants_details_new"):
+        if st.button("💾 Save", key="save_participants_details_new"):
             current_participants_on_disk = load_table("participants")
             existing_ids_on_disk = set(current_participants_on_disk["Standard ID"])
             changes_detected = False
