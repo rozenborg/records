@@ -300,14 +300,14 @@ st.title("AI Adoption Program Tracker")
 ensure_data_dir()
 
 SECTION_NAMES = {
-    "Employees": "employees",
-    "Workshop Series": "workshops",
-    "Cohorts": "cohorts",
+    "Participants": "manage_participation",
     "Events": "events",
-    "Participants": "manage_participation" # Changed display name, kept internal key
+    "Cohorts": "cohorts",
+    "Workshop Series": "workshops",
+    "Employees": "employees"
 }
-# Use index=3 to default to Events view if possible, else 0
-default_index = 3 if len(SECTION_NAMES) > 3 else 0
+# Use index=0 to default to Participants view
+default_index = 0
 section_label = st.sidebar.selectbox("Section", list(SECTION_NAMES.keys()), index=default_index)
 table_key = SECTION_NAMES[section_label]
 
@@ -317,7 +317,7 @@ table_key = SECTION_NAMES[section_label]
 
 # --- Manage Participation Section ---
 if table_key == "manage_participation":
-    st.subheader("Participants")
+    st.header("Participants")
 
     employees_df = load_table("employees")
     events_df = load_table("events")
@@ -354,7 +354,7 @@ if table_key == "manage_participation":
                 column_config=column_config_participants
             )
 
-            if st.button("💾 Save Changes", key="save_participants"):
+            if st.button("💾  Save", key="save_participants"):
                 # Update both participants.csv and events.csv
                 for _, row in edited_participants.iterrows():
                     statuses = row["Status"].split(", ")
@@ -368,89 +368,89 @@ if table_key == "manage_participation":
                 st.rerun()
 
         # Move participant management to sidebar
-        st.sidebar.markdown("### Add New Participation Records")
-        
-        # Event Selection
-        event_options = {f"{row['Event ID']} - {row['Name']} ({row['Date'].strftime('%Y-%m-%d')})": row['Event ID']
-                         for _, row in events_df.sort_values("Date", ascending=False).iterrows()}
-        selected_event_display = st.sidebar.selectbox(
-            "Select Event",
-            options=list(event_options.keys())
-        )
-        selected_event_id = event_options.get(selected_event_display)
-
-        st.sidebar.markdown("---")
-
-        # Input Employee IDs/Emails
-        st.sidebar.markdown("#### Select Employees")
-        employee_ids_to_process = []
-        invalid_inputs_detected = []
-        expander_paste = st.sidebar.expander("Paste List", expanded=True)
-        expander_select = st.sidebar.expander("Select from List", expanded=False)
-        expander_upload = st.sidebar.expander("Upload File", expanded=False)
-
-        with expander_paste:
-            pasted_list = st.text_area("Paste Standard IDs or Emails (one per line)", key="participants_paste")
-            if pasted_list:
-                employee_ids_to_process, invalid_inputs_detected = get_employee_ids_from_input(pasted_list, employees_df)
-                st.write(f"Found {len(employee_ids_to_process)} valid employee(s).")
-                if invalid_inputs_detected:
-                    st.warning(f"Could not find/validate: {', '.join(invalid_inputs_detected)}")
-
-        with expander_select:
-            employee_display_options = [f"{row['Standard ID']} - {row['Email']}"
-                                        for _, row in employees_df.iterrows()]
-            selected_employees = st.multiselect(
-                "Select Employees",
-                options=employee_display_options,
-                key="participants_multiselect"
+        with st.sidebar.expander("📝 Add/Update Participation Records", expanded=True):
+            st.markdown("### Add New Participation Records")
+            
+            # Event Selection
+            event_options = {f"{row['Event ID']} - {row['Name']} ({row['Date'].strftime('%Y-%m-%d')})": row['Event ID']
+                             for _, row in events_df.sort_values("Date", ascending=False).iterrows()}
+            selected_event_display = st.selectbox(
+                "Select Event",
+                options=list(event_options.keys())
             )
-            if selected_employees:
-                employee_ids_to_process = [opt.split(' - ')[0] for opt in selected_employees]
+            selected_event_id = event_options.get(selected_event_display)
 
-        with expander_upload:
-            uploaded_file = st.file_uploader("Upload .txt or .csv (one ID/email per line)", type=["txt", "csv"], key="participants_upload")
-            if uploaded_file is not None:
-                stringio = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
-                file_content = stringio.read()
-                employee_ids_to_process, invalid_inputs_detected = get_employee_ids_from_input(file_content, employees_df)
-                st.write(f"Found {len(employee_ids_to_process)} valid employee(s).")
-                if invalid_inputs_detected:
-                    st.warning(f"Could not find/validate: {', '.join(invalid_inputs_detected)}")
+            st.divider()
 
-        st.sidebar.markdown("---")
+            # Input Employee IDs/Emails
+            st.markdown("#### Select Employees")
+            employee_ids_to_process = []
+            invalid_inputs_detected = []
 
-        # Select Participation Type
-        st.sidebar.markdown("#### Set Participation Status")
-        mark_registered = st.sidebar.checkbox("Registered")
-        mark_participated = st.sidebar.checkbox("Participated")
+            tab_paste, tab_select, tab_upload = st.tabs(["Paste List", "Select from List", "Upload File"])
 
-        st.sidebar.markdown("---")
+            with tab_paste:
+                pasted_list = st.text_area("Paste Standard IDs or Emails (one per line)", key="participants_paste")
+                if pasted_list:
+                    employee_ids_to_process, invalid_inputs_detected = get_employee_ids_from_input(pasted_list, employees_df)
+                    st.write(f"Found {len(employee_ids_to_process)} valid employee(s).")
+                    if invalid_inputs_detected:
+                        st.warning(f"Could not find/validate: {', '.join(invalid_inputs_detected)}")
 
-        # Update Button
-        if st.sidebar.button("Update Participation", disabled=(not selected_event_id or not employee_ids_to_process or (not mark_registered and not mark_participated))):
-            added_reg, added_part = update_event_participation(
-                selected_event_id,
-                employee_ids_to_process,
-                mark_registered,
-                mark_participated
-            )
-            success_msgs = []
-            if mark_registered:
-                 success_msgs.append(f"Added {added_reg} new registration(s).")
-            if mark_participated:
-                success_msgs.append(f"Added {added_part} new participation record(s).")
+            with tab_select:
+                employee_display_options = [f"{row['Standard ID']} - {row['Email']}"
+                                            for _, row in employees_df.iterrows()]
+                selected_employees = st.multiselect(
+                    "Select Employees",
+                    options=employee_display_options,
+                    key="participants_multiselect"
+                )
+                if selected_employees:
+                    employee_ids_to_process = [opt.split(' - ')[0] for opt in selected_employees]
 
-            if success_msgs:
-                st.sidebar.success(f"Successfully updated event '{selected_event_display}'. {' '.join(success_msgs)}")
-                st.rerun()
-            else:
-                st.sidebar.info("No changes made (employees might already have the selected status).")
+            with tab_upload:
+                uploaded_file = st.file_uploader("Upload .txt or .csv (one ID/email per line)", type=["txt", "csv"], key="participants_upload")
+                if uploaded_file is not None:
+                    stringio = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
+                    file_content = stringio.read()
+                    employee_ids_to_process, invalid_inputs_detected = get_employee_ids_from_input(file_content, employees_df)
+                    st.write(f"Found {len(employee_ids_to_process)} valid employee(s).")
+                    if invalid_inputs_detected:
+                        st.warning(f"Could not find/validate: {', '.join(invalid_inputs_detected)}")
+
+            st.divider()
+
+            # Select Participation Type
+            st.markdown("#### Set Participation Status")
+            mark_registered = st.checkbox("Registered")
+            mark_participated = st.checkbox("Participated")
+
+            st.divider()
+
+            # Update Button
+            if st.button("Update Participation", disabled=(not selected_event_id or not employee_ids_to_process or (not mark_registered and not mark_participated))):
+                added_reg, added_part = update_event_participation(
+                    selected_event_id,
+                    employee_ids_to_process,
+                    mark_registered,
+                    mark_participated
+                )
+                success_msgs = []
+                if mark_registered:
+                     success_msgs.append(f"Added {added_reg} new registration(s).")
+                if mark_participated:
+                    success_msgs.append(f"Added {added_part} new participation record(s).")
+
+                if success_msgs:
+                    st.success(f"Successfully updated event '{selected_event_display}'. {' '.join(success_msgs)}")
+                    st.rerun()
+                else:
+                    st.info("No changes made (employees might already have the selected status).")
 
 # --- Other Sections (Employees, Workshops, Cohorts, Events) ---
 else:
     df = load_table(table_key)
-    st.subheader(f"{section_label} Table")
+    st.header(section_label)
 
     # For employees table, allow toggling display of dynamic columns
     displayed_columns = FILES[table_key][1][:] # Start with core internal columns
@@ -463,13 +463,14 @@ else:
         optional_columns = [col for col in all_available_columns if col not in ["Standard ID", "Email"]]
         
         if optional_columns:
-            st.sidebar.markdown("### Display Columns")
-            selected_optional_cols = st.sidebar.multiselect(
-                "Select additional columns to display:",
-                options=optional_columns,
-                default=[] # Initially, only show Standard ID and Email
-            )
-            displayed_columns.extend(selected_optional_cols)
+            with st.sidebar.expander("📊 Display Options", expanded=True):
+                st.markdown("### Display Columns")
+                selected_optional_cols = st.multiselect(
+                    "Select additional columns to display:",
+                    options=optional_columns,
+                    default=[] # Initially, only show Standard ID and Email
+                )
+                displayed_columns.extend(selected_optional_cols)
         
         # Ensure Standard ID and Email are always first and present, even if user deselects them (though they can't)
         if "Email" not in displayed_columns:
@@ -486,13 +487,14 @@ else:
     df_display_paginated = df_for_display # Default to full display
     
     if len(df_for_display) > 1000:
-        page_size = st.sidebar.slider("Rows per page", 100, 1000, 500, key=f"pagesize_{table_key}")
-        total_pages = len(df_for_display) // page_size + (1 if len(df_for_display) % page_size > 0 else 0)
-        page = st.sidebar.number_input("Page", 1, total_pages, 1, key=f"page_{table_key}")
-        start_idx = (page - 1) * page_size
-        end_idx = start_idx + page_size
-        df_display_paginated = df_for_display.iloc[start_idx:end_idx]
-        st.sidebar.caption(f"Showing {start_idx + 1}-{min(end_idx, len(df_for_display))} of {len(df_for_display)} rows")
+        with st.sidebar.expander("📄 Pagination Controls", expanded=True):
+            page_size = st.slider("Rows per page", 100, 1000, 500, key=f"pagesize_{table_key}")
+            total_pages = len(df_for_display) // page_size + (1 if len(df_for_display) % page_size > 0 else 0)
+            page = st.number_input("Page", 1, total_pages, 1, key=f"page_{table_key}")
+            start_idx = (page - 1) * page_size
+            end_idx = start_idx + page_size
+            df_display_paginated = df_for_display.iloc[start_idx:end_idx]
+            st.caption(f"Showing {start_idx + 1}-{min(end_idx, len(df_for_display))} of {len(df_for_display)} rows")
     else:
         df_display_paginated = df_for_display # show all if less than 1000
 
@@ -522,7 +524,6 @@ else:
             "Category": st.column_config.SelectboxColumn("Category", options=list(EVENT_CATEGORIES.keys()), required=True)
         }
 
-        st.markdown("### Events Table")
         edited_df = st.data_editor(
             df_display_paginated, num_rows="dynamic", key=f"editor_{table_key}",
             use_container_width=True, column_config=column_config_events
@@ -538,42 +539,40 @@ else:
             load_table.clear()
             st.rerun()
 
-        # Form for adding new events - MOVED TO SIDEBAR
-        st.sidebar.markdown("### Add New Event")
-        with st.sidebar.form("new_event_form"):
-            event_name = st.text_input("Event Name")
-            event_date = st.date_input("Event Date")
-            event_category = st.selectbox("Category", options=list(EVENT_CATEGORIES.keys()), help="Select the type of event")
-            
-            workshop_df_form = load_table("workshops")
-            form_workshop_options = [f"{row['Workshop #']} - {row['Skill']}: {row['Goal']}" for _, row in workshop_df_form.iterrows()]
-            form_workshop_options.insert(0, "")
-            selected_workshop_display = st.selectbox("Workshop (if applicable)", options=form_workshop_options, help="Select the workshop this event is an instance of (if applicable)") if event_category == "Workshop" else ""
-            selected_workshop_id = selected_workshop_display.split(" - ")[0] if selected_workshop_display and " - " in selected_workshop_display else ""
+        # Sidebar: Add-new-event form wrapped in an expander for tidier layout
+        with st.sidebar.expander("➕ Add New Event", expanded=False):
+            with st.form("new_event_form"):
+                event_name = st.text_input("Event Name")
+                event_date = st.date_input("Event Date")
+                event_category = st.selectbox("Category", options=list(EVENT_CATEGORIES.keys()), help="Select the type of event")
+                
+                workshop_df_form = load_table("workshops")
+                form_workshop_options = [f"{row['Workshop #']} - {row['Skill']}: {row['Goal']}" for _, row in workshop_df_form.iterrows()]
+                form_workshop_options.insert(0, "")
+                selected_workshop_display = st.selectbox("Workshop (if applicable)", options=form_workshop_options, help="Select the workshop this event is an instance of (if applicable)") if event_category == "Workshop" else ""
+                selected_workshop_id = selected_workshop_display.split(" - ")[0] if selected_workshop_display and " - " in selected_workshop_display else ""
 
-            submitted = st.form_submit_button("Add Event")
-            if submitted:
-                base_df_for_id = edited_df if len(df) <= 1000 else df
-                prefix_map = {"Workshop": "W", "Demo": "D", "Meeting": "M", "Conference": "C"}
-                prefix = prefix_map.get(event_category, "E")
-                date_str = event_date.strftime("%Y%m%d")
-                existing_ids = base_df_for_id[base_df_for_id["Event ID"].str.startswith(f"{prefix}{date_str}-")]
-                if existing_ids.empty: next_seq = 1
-                else: next_seq = existing_ids["Event ID"].str.split("-").str[-1].astype(int).max() + 1
-                event_id = f"{prefix}{date_str}-{next_seq:02d}"
+                submitted = st.form_submit_button("Add Event")
+                if submitted:
+                    base_df_for_id = edited_df if len(df) <= 1000 else df
+                    prefix_map = {"Workshop": "W", "Demo": "D", "Meeting": "M", "Conference": "C"}
+                    prefix = prefix_map.get(event_category, "E")
+                    date_str = event_date.strftime("%Y%m%d")
+                    existing_ids = base_df_for_id[base_df_for_id["Event ID"].str.startswith(f"{prefix}{date_str}-")]
+                    if existing_ids.empty: next_seq = 1
+                    else: next_seq = existing_ids["Event ID"].str.split("-").str[-1].astype(int).max() + 1
+                    event_id = f"{prefix}{date_str}-{next_seq:02d}"
 
-                new_event = pd.DataFrame([{
-                    "Event ID": event_id, "Name": event_name, 
-                    "Date": pd.to_datetime(event_date.strftime("%Y-%m-%d"), errors='coerce'),
-                    "Category": event_category, "Workshop": selected_workshop_id,
-                    "Registrations": "", "Participants": ""
-                }])
-                st.session_state['newly_added_event'] = new_event
-                st.rerun()
+                    new_event = pd.DataFrame([{
+                        "Event ID": event_id, "Name": event_name, 
+                        "Date": pd.to_datetime(event_date.strftime("%Y-%m-%d"), errors='coerce'),
+                        "Category": event_category, "Workshop": selected_workshop_id,
+                        "Registrations": "", "Participants": ""
+                    }])
+                    st.session_state['newly_added_event'] = new_event
+                    st.rerun()
 
-        # Save Button for Table Edits
-        st.markdown("### Save Table Edits")
-        if st.button("💾 Save Table Changes", key=f"save_{table_key}"):
+        if st.button("💾  Save", key=f"save_{table_key}"):
             if len(df) > 1000:
                 df.iloc[start_idx:end_idx] = edited_df
                 save_table(table_key, df)
@@ -585,11 +584,8 @@ else:
 
     # Custom section for Cohorts
     elif table_key == "cohorts":
-        st.subheader("Cohorts")
         employees_df = load_table("employees") # Needed for employee selection
 
-        # Display existing cohorts
-        st.markdown("### Cohorts Table")
         column_config_cohorts = {
             "Nominated": st.column_config.TextColumn("Nominated", help="Comma-separated Standard IDs.", disabled=True),
             "Participants": st.column_config.TextColumn("Participants", help="Comma-separated Standard IDs.", disabled=True),
@@ -611,8 +607,7 @@ else:
             st.rerun()
 
         # Save Button for Table Edits
-        st.markdown("### Save Table Edits")
-        if st.button("💾 Save Table Changes", key=f"save_{table_key}"):
+        if st.button("💾  Save", key=f"save_{table_key}"):
              if len(df) > 1000:
                 df.iloc[start_idx:end_idx] = edited_df
                 save_table(table_key, df)
@@ -622,112 +617,111 @@ else:
              load_table.clear()
              st.rerun()
 
-        st.markdown("---")
+        # Sidebar: Add-new-cohort form wrapped in an expander for tidier layout
+        with st.sidebar.expander("➕ Add New Cohort", expanded=False):
+            with st.form("new_cohort_form"):
+                cohort_name = st.text_input("Cohort Name")
+                cohort_date = st.date_input("Date Started")
+                submitted = st.form_submit_button("Add Cohort")
+                if submitted and cohort_name:
+                    # Check if cohort name already exists (using potentially edited df)
+                    check_df = edited_df if len(df) <= 1000 else df
+                    if cohort_name in check_df["Name"].values:
+                         st.error(f"Cohort with name '{cohort_name}' already exists.")
+                    else:
+                        new_cohort = pd.DataFrame([{
+                            "Name": cohort_name,
+                            "Date Started": pd.to_datetime(cohort_date.strftime("%Y-%m-%d"), errors='coerce'),
+                            "Nominated": "",
+                            "Participants": ""
+                        }])
+                        st.session_state['newly_added_cohort'] = new_cohort
+                        st.rerun()
+                elif submitted:
+                    st.warning("Cohort Name cannot be empty.")
 
-        # Form for adding new cohorts
-        st.markdown("### Add New Cohort")
-        with st.form("new_cohort_form"):
-            cohort_name = st.text_input("Cohort Name")
-            cohort_date = st.date_input("Date Started")
-            submitted = st.form_submit_button("Add Cohort")
-            if submitted and cohort_name:
-                # Check if cohort name already exists (using potentially edited df)
-                check_df = edited_df if len(df) <= 1000 else df
-                if cohort_name in check_df["Name"].values:
-                     st.error(f"Cohort with name '{cohort_name}' already exists.")
-                else:
-                    new_cohort = pd.DataFrame([{
-                        "Name": cohort_name,
-                        "Date Started": cohort_date.strftime("%Y-%m-%d"),
-                        "Nominated": "",
-                        "Participants": ""
-                    }])
-                    st.session_state['newly_added_cohort'] = new_cohort
-                    st.rerun()
-            elif submitted:
-                st.warning("Cohort Name cannot be empty.")
-
-        st.markdown("---")
+        st.sidebar.divider()
 
         # Manage Cohort Membership
-        st.markdown("### Manage Cohort Membership")
-        if df.empty:
-            st.warning("No cohorts exist yet. Add a cohort first.")
-        elif employees_df.empty:
-            st.warning("No employees found. Please add employees in the 'Employees' section first.")
-        else:
-            # Cohort Selection
-            cohort_options = {row['Name']: row['Name'] for _, row in df.iterrows()}
-            selected_cohort_name = st.selectbox(
-                "Select Cohort",
-                options=list(cohort_options.keys())
-            )
-
-            st.markdown("---")
-
-            # Input Employee IDs/Emails
-            st.markdown("#### Select Employees")
-            input_method = st.tabs(["Paste List", "Select from List", "Upload File"])
-            employee_ids_to_process = []
-            invalid_inputs_detected = []
-
-            with input_method[0]: # Paste List
-                pasted_list = st.text_area("Paste Standard IDs or Emails (one per line)", key="cohort_paste")
-                if pasted_list:
-                    employee_ids_to_process, invalid_inputs_detected = get_employee_ids_from_input(pasted_list, employees_df)
-                    st.write(f"Found {len(employee_ids_to_process)} valid employee(s).")
-                    if invalid_inputs_detected:
-                        st.warning(f"Could not find/validate: {', '.join(invalid_inputs_detected)}")
-
-            with input_method[1]: # Select from List
-                employee_display_options = [f"{row['Standard ID']} - {row['Email']}"
-                                            for _, row in employees_df.iterrows()]
-                selected_employees = st.multiselect(
-                    "Select Employees",
-                    options=employee_display_options,
-                    key="cohort_multiselect"
+        with st.sidebar.expander("👥 Manage Cohort Members", expanded=True):
+            st.markdown("### Manage Cohort Membership")
+            if df.empty:
+                st.warning("No cohorts exist yet. Add a cohort first.")
+            elif employees_df.empty:
+                st.warning("No employees found. Please add employees in the 'Employees' section first.")
+            else:
+                # Cohort Selection
+                cohort_options = {row['Name']: row['Name'] for _, row in df.iterrows()}
+                selected_cohort_name = st.selectbox(
+                    "Select Cohort",
+                    options=list(cohort_options.keys())
                 )
-                if selected_employees:
-                    employee_ids_to_process = [opt.split(' - ')[0] for opt in selected_employees]
 
-            with input_method[2]: # Upload File
-                uploaded_file = st.file_uploader("Upload .txt or .csv (one ID/email per line)", type=["txt", "csv"], key="cohort_upload")
-                if uploaded_file is not None:
-                    stringio = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
-                    file_content = stringio.read()
-                    employee_ids_to_process, invalid_inputs_detected = get_employee_ids_from_input(file_content, employees_df)
-                    st.write(f"Found {len(employee_ids_to_process)} valid employee(s).")
-                    if invalid_inputs_detected:
-                        st.warning(f"Could not find/validate: {', '.join(invalid_inputs_detected)}")
+                st.divider()
 
-            st.markdown("---")
+                # Input Employee IDs/Emails
+                st.markdown("#### Select Employees")
+                input_method = st.tabs(["Paste List", "Select from List", "Upload File"])
+                employee_ids_to_process = []
+                invalid_inputs_detected = []
 
-            # Select Membership Type
-            st.markdown("#### Set Membership Status")
-            mark_nominated = st.checkbox("Nominated")
-            mark_participant = st.checkbox("Participated")
+                with input_method[0]: # Paste List
+                    pasted_list = st.text_area("Paste Standard IDs or Emails (one per line)", key="cohort_paste")
+                    if pasted_list:
+                        employee_ids_to_process, invalid_inputs_detected = get_employee_ids_from_input(pasted_list, employees_df)
+                        st.write(f"Found {len(employee_ids_to_process)} valid employee(s).")
+                        if invalid_inputs_detected:
+                            st.warning(f"Could not find/validate: {', '.join(invalid_inputs_detected)}")
 
-            st.markdown("---")
+                with input_method[1]: # Select from List
+                    employee_display_options = [f"{row['Standard ID']} - {row['Email']}"
+                                                for _, row in employees_df.iterrows()]
+                    selected_employees = st.multiselect(
+                        "Select Employees",
+                        options=employee_display_options,
+                        key="cohort_multiselect"
+                    )
+                    if selected_employees:
+                        employee_ids_to_process = [opt.split(' - ')[0] for opt in selected_employees]
 
-            # Update Button
-            if st.button("Update Cohort Membership", disabled=(not selected_cohort_name or not employee_ids_to_process or (not mark_nominated and not mark_participant))):
-                added_nom, added_part = update_cohort_membership(
-                    selected_cohort_name,
-                    employee_ids_to_process,
-                    mark_nominated,
-                    mark_participant
-                )
-                success_msgs = []
-                if mark_nominated:
-                     success_msgs.append(f"Added {added_nom} new nomination(s).")
-                if mark_participant:
-                    success_msgs.append(f"Added {added_part} new participant(s).")
+                with input_method[2]: # Upload File
+                    uploaded_file = st.file_uploader("Upload .txt or .csv (one ID/email per line)", type=["txt", "csv"], key="cohort_upload")
+                    if uploaded_file is not None:
+                        stringio = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
+                        file_content = stringio.read()
+                        employee_ids_to_process, invalid_inputs_detected = get_employee_ids_from_input(file_content, employees_df)
+                        st.write(f"Found {len(employee_ids_to_process)} valid employee(s).")
+                        if invalid_inputs_detected:
+                            st.warning(f"Could not find/validate: {', '.join(invalid_inputs_detected)}")
 
-                if success_msgs:
-                    st.success(f"Successfully updated cohort '{selected_cohort_name}'. {' '.join(success_msgs)}")
-                    st.rerun()
-                else:
-                    st.info("No changes made (employees might already have the selected status or cohort name not found).")
+                st.divider()
+
+                # Select Membership Type
+                st.markdown("#### Set Membership Status")
+                mark_nominated = st.checkbox("Nominated")
+                mark_participant = st.checkbox("Participated")
+
+                st.divider()
+
+                # Update Button
+                if st.button("Update Cohort Membership", disabled=(not selected_cohort_name or not employee_ids_to_process or (not mark_nominated and not mark_participant))):
+                    added_nom, added_part = update_cohort_membership(
+                        selected_cohort_name,
+                        employee_ids_to_process,
+                        mark_nominated,
+                        mark_participant
+                    )
+                    success_msgs = []
+                    if mark_nominated:
+                         success_msgs.append(f"Added {added_nom} new nomination(s).")
+                    if mark_participant:
+                        success_msgs.append(f"Added {added_part} new participant(s).")
+
+                    if success_msgs:
+                        st.success(f"Successfully updated cohort '{selected_cohort_name}'. {' '.join(success_msgs)}")
+                        st.rerun()
+                    else:
+                        st.info("No changes made (employees might already have the selected status or cohort name not found).")
 
     # Standard editor for other sections
     else:
@@ -743,7 +737,7 @@ else:
             key=_editor_key,
             use_container_width=True
         )
-        if st.button("💾 Save changes", key=f"save_{table_key}"):
+        if st.button("💾  Save", key=f"save_{table_key}"):
             # df is the original full DataFrame loaded from load_table()
             # df_for_display is df[displayed_columns] (original data, subset of columns)
             # edited_df_subset is the result of st.data_editor on df_display_paginated (a page or full, with displayed_columns and dynamic rows)
@@ -794,54 +788,4 @@ else:
     # ---------------------------------------------------------------------------
     # Context-specific helpers (Only for non-participation sections)
     # ---------------------------------------------------------------------------
-    if table_key == "employees":
-        st.markdown("### Quick Category Tagger")
-        if not df.empty and "Categories" in df.columns: # Check if Categories column exists
-            employee_options = {f"{row['Standard ID']} - {row['Email']}": row['Standard ID']
-                                for _, row in df.iterrows()}
-            selected_employee_display = st.selectbox(
-                "Choose employee",
-                options=list(employee_options.keys())
-            )
-            employee_id = employee_options.get(selected_employee_display)
-
-            if employee_id:
-                categories_master = ["Working Group Lead", "Train-the-Trainer Candidate", "AInfluencer", "Offering Support"]
-                current_cats_series = df.loc[df["Standard ID"] == employee_id, "Categories"]
-                current = current_cats_series.iloc[0] if not current_cats_series.empty else ""
-                current_list = [c for c in current.split(";") if c]
-
-                new_cats = st.multiselect("Assign special roles", categories_master, default=current_list, key=f"multiselect_{employee_id}")
-                if st.button("Update categories"):
-                    df.loc[df["Standard ID"] == employee_id, "Categories"] = ";".join(new_cats)
-                    save_table(table_key, df)
-                    st.success("Categories updated.")
-                    load_table.clear() # Clear cache
-                    st.rerun()
-
-    elif table_key == "workshops":
-        st.info(
-            """Use **Instances** to store comma-separated Event IDs.
-            **Registered/Participated** store comma-separated Standard IDs.
-
-            Relations are simple CSV references; production apps need a database."""
-        )
-
-    elif table_key == "cohorts":
-        st.info("Nominated & Participants expect comma-separated Standard IDs.")
-
-    elif table_key == "events":
-        st.markdown("""⚙️ **Guidance**  
-     <ul>
-     <li>Set <code>Category</code> to <em>Workshop</em> and enter the corresponding <code>Workshop #</code> if this event is an official workshop instance.</li>
-     <li>Keep <code>Date</code> in YYYY-MM-DD format for easy sorting.</li>
-     </ul>""", unsafe_allow_html=True)
-
-###############################################################################
-# Footer
-###############################################################################
-st.sidebar.markdown("---")
-st.sidebar.caption(
-    "CSV-backed prototype stored in the ./data folder."
-)
-st.sidebar.caption("Built with Streamlit • pandas • Python ≥ 3.9")
+    # Removed Quick Category Tagger for Employees section
