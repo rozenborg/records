@@ -871,10 +871,9 @@ def update_cohort_membership(cohort_name: str, employee_ids_to_process: list[str
             # Let's assume for now 'notes_details' are cohort-specific and should update the participant's main 'Notes' field.
             if action_taken_for_cohort and notes_details:
                 current_notes = str(participants_df.loc[participant_idx, "Notes"])
-                # Simple append if new notes are different. A more sophisticated merge might be needed.
-                new_note_entry = f"Cohort '{cohort_name}': {notes_details}"
-                if new_note_entry not in current_notes: # Avoid duplicate note entries
-                    updated_notes = f"{current_notes}\\n{new_note_entry}".strip() if current_notes else new_note_entry
+                # Append raw notes_details, separated by newline if needed
+                if notes_details not in current_notes:
+                    updated_notes = f"{current_notes}\n{notes_details}".strip() if current_notes else notes_details
                     participants_df.loc[participant_idx, "Notes"] = updated_notes
                     participant_row_changed = True
 
@@ -919,7 +918,7 @@ def update_cohort_membership(cohort_name: str, employee_ids_to_process: list[str
                 temp_nominated_by_list.append(nominated_by_details)
             
             if action_taken_for_new_participant_cohort and notes_details:
-                temp_notes = f"Cohort '{cohort_name}': {notes_details}"
+                temp_notes = notes_details
 
 
             new_row_data["Cohorts Nominated"] = ",".join(sorted(list(filter(None, temp_emp_cohorts_nominated))))
