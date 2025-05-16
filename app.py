@@ -502,6 +502,22 @@ def ensure_data_dir() -> None:
     if not os.path.exists(BACKUP_DIR):
         os.makedirs(BACKUP_DIR)
 
+def log_absent_identifier(identifier: str) -> None:
+    """Logs an identifier not found in employees.csv to could_not_find.csv."""
+    ensure_data_dir()  # Ensure DATA_DIR exists
+    log_file_path = os.path.join(DATA_DIR, "could_not_find.csv")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Create a new DataFrame for the entry
+    # Ensure columns are in the correct order for concatenation if file exists
+    new_entry_df = pd.DataFrame([[identifier, now]], columns=["Identifier", "Timestamp"])
+
+    if not os.path.exists(log_file_path):
+        new_entry_df.to_csv(log_file_path, index=False)
+    else:
+        # Append without header
+        new_entry_df.to_csv(log_file_path, mode='a', header=False, index=False)
+
 def _path_for(key: str) -> str:
     """Absolute CSV path for a given logical table key."""
     filename, _ = FILES[key]
@@ -640,16 +656,17 @@ def get_employee_ids_from_input(input_str: str, all_employees: pd.DataFrame) -> 
     return sorted(list(valid_ids)), invalid_inputs
 
 
-def update_employee_event_status(employee_ids: list[str], event_id: str, mark_registered: Union[bool, None], mark_participated: Union[bool, None], mark_hosted: Union[bool, None]) -> tuple[int, int, int]:
+def update_employee_event_status(employee_ids_to_process: list[str], absent_ids_set: set[str], event_id: str, mark_registered: Union[bool, None], mark_participated: Union[bool, None], mark_hosted: Union[bool, None]) -> tuple[int, int, int]:
     """Updates event status (Registered, Participated, Hosted) for employees by ADDING them to the respective lists if marked.
     Does NOT remove employees from lists if a mark is False/None. Removals must be handled manually if needed.
+    Logs identifiers not found in employees.csv.
     """
-    if not event_id or not employee_ids:
+    if not event_id or not employee_ids_to_process:
         return 0, 0, 0
 
     participants_df = load_table("participants")
     events_df = load_table("events")
-    employees_df = load_table("employees")
+    employees_df = load_table("employees") # Still needed for existing employees' details
     load_table.clear()
 
     event_row_series = events_df[events_df["Event ID"] == event_id]
@@ -668,12 +685,12 @@ def update_employee_event_status(employee_ids: list[str], event_id: str, mark_re
     event_participants = set(str(events_df.loc[event_idx, "Participants"]).split(',') if events_df.loc[event_idx, "Participants"] else [])
     event_hosts = set(str(events_df.loc[event_idx, "Hosted"]).split(',') if events_df.loc[event_idx, "Hosted"] else [])
 
-    # Store initial lengths to calculate *newly added* later
-    initial_event_reg_len = len(event_registrations)
-    initial_event_part_len = len(event_participants)
-    initial_event_host_len = len(event_hosts)
+    initial_event_reg_len = len(event_registrations - {''}) # Exclude empty string from count
+    initial_event_part_len = len(event_participants - {''})
+    initial_event_host_len = len(event_hosts - {''})
 
-    for emp_id in employee_ids:
+
+    for emp_id in employee_ids_to_process:
         if mark_registered is True:
             event_registrations.add(emp_id)
         
@@ -686,26 +703,48 @@ def update_employee_event_status(employee_ids: list[str], event_id: str, mark_re
     events_df.loc[event_idx, "Registrations"] = ",".join(sorted(list(filter(None, event_registrations))))
     events_df.loc[event_idx, "Participants"] = ",".join(sorted(list(filter(None, event_participants))))
     events_df.loc[event_idx, "Hosted"] = ",".join(sorted(list(filter(None, event_hosts))))
+    
+    # Calculate newly added counts more accurately
+    if mark_registered is True: 
+        final_event_reg_len = len(set(filter(None, str(events_df.loc[event_idx, "Registrations"]).split(','))))
+        newly_registered_count = final_event_reg_len - initial_event_reg_len
+    if mark_participated is True: 
+        final_event_part_len = len(set(filter(None, str(events_df.loc[event_idx, "Participants"]).split(','))))
+        newly_participated_count = final_event_part_len - initial_event_part_len
+    if mark_hosted is True: 
+        final_event_host_len = len(set(filter(None, str(events_df.loc[event_idx, "Hosted"]).split(','))))
+        newly_hosted_count = final_event_host_len - initial_event_host_len
 
-    if mark_registered is True: newly_registered_count = len(event_registrations) - initial_event_reg_len
-    if mark_participated is True: newly_participated_count = len(event_participants) - initial_event_part_len
-    if mark_hosted is True: newly_hosted_count = len(event_hosts) - initial_event_host_len
 
     # --- Update participants.csv --- 
-    for emp_id in employee_ids:
+    for emp_id in employee_ids_to_process:
+        if emp_id in absent_ids_set:
+            log_absent_identifier(emp_id)
+
         participant_indices = participants_df[participants_df["Standard ID"] == emp_id].index
         participant_idx = -1 
         if participant_indices.empty:
-            emp_details = employees_df[employees_df["Standard ID"] == emp_id]
-            email = emp_details["Email"].iloc[0] if not emp_details.empty else ""
+            emp_details = employees_df[employees_df["Standard ID"] == emp_id] # Will be empty for absent IDs
+            
+            email_for_new_participant = ""
+            if "@" in emp_id: # If the emp_id itself is an email (because it wasn't found or is the identifier)
+                email_for_new_participant = emp_id
+            elif not emp_details.empty: # It's a valid ID found in employees_df
+                 email_for_new_participant = emp_details["Email"].iloc[0]
+            # If emp_id is a non-email ID not found in employees_df, email_for_new_participant remains ""
+            
             new_row_data = {col: "" for col in participants_df.columns}
             new_row_data["Standard ID"] = emp_id
-            new_row_data["Email"] = email
-            if "Waitlist" in new_row_data: new_row_data["Waitlist"] = "No"
+            new_row_data["Email"] = email_for_new_participant
+            if "Waitlist" in new_row_data: new_row_data["Waitlist"] = "No" # Default for new entries
             
             participants_df = pd.concat([participants_df, pd.DataFrame([new_row_data])], ignore_index=True)
             participant_idx = participants_df[participants_df["Standard ID"] == emp_id].index[0]
-            st.info(f"Created new entry in participants.csv for {emp_id}")
+            
+            if emp_id in absent_ids_set:
+                st.info(f"Created new entry in participants.csv for unvalidated identifier: {emp_id}")
+            else:
+                st.info(f"Created new entry in participants.csv for {emp_id}")
         else:
             participant_idx = participant_indices[0]
 
@@ -736,16 +775,17 @@ def update_employee_event_status(employee_ids: list[str], event_id: str, mark_re
     return newly_registered_count, newly_participated_count, newly_hosted_count
 
 
-def update_cohort_membership(cohort_name: str, employee_ids: list[str], mark_nominated: bool, mark_invited: bool, mark_joined: bool, nominated_by_details: str = "", notes_details: str = "") -> tuple[int, int, int]:
+def update_cohort_membership(cohort_name: str, employee_ids_to_process: list[str], absent_ids_set: set[str], mark_nominated: bool, mark_invited: bool, mark_joined: bool, nominated_by_details: str = "", notes_details: str = "") -> tuple[int, int, int]:
     """Adds employee IDs to the Nominated, Invited, and/or Joined fields for a given cohort.
     Updates Cohort Membership Details in participants.csv with nominated_by and notes information.
+    Logs identifiers not found in employees.csv.
     """
-    if not cohort_name or not employee_ids or (not mark_nominated and not mark_invited and not mark_joined):
+    if not cohort_name or not employee_ids_to_process or (not mark_nominated and not mark_invited and not mark_joined):
         return 0, 0, 0 # Nothing to do
 
     cohorts_df = load_table("cohorts")
-    participants_df = load_table("participants") # Load participants.csv
-    employees_df = load_table("employees") # Load employees for email lookup
+    participants_df = load_table("participants") 
+    employees_df = load_table("employees") 
     # load_table.clear() # Clear after all reads, before writes, or at the very end.
 
     cohort_index_list = cohorts_df.index[cohorts_df["Name"] == cohort_name].tolist()
@@ -760,38 +800,39 @@ def update_cohort_membership(cohort_name: str, employee_ids: list[str], mark_nom
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     # --- Update cohorts.csv --- 
-    # For Nominated
     if mark_nominated:
         current_cohort_nominees = set(str(cohorts_df.loc[cohort_idx, "Nominated"]).split(',') if cohorts_df.loc[cohort_idx, "Nominated"] else [])
-        initial_len = len(current_cohort_nominees)
-        current_cohort_nominees.update(employee_ids)
+        initial_len = len(current_cohort_nominees - {''})
+        current_cohort_nominees.update(employee_ids_to_process)
         cohorts_df.loc[cohort_idx, "Nominated"] = ",".join(sorted(list(filter(None, current_cohort_nominees))))
-        added_nominees_count = len(current_cohort_nominees) - initial_len
+        added_nominees_count = len(set(filter(None, current_cohort_nominees))) - initial_len
 
-    # For Invited
+
     if mark_invited:
         current_cohort_invited = set(str(cohorts_df.loc[cohort_idx, "Invited"]).split(',') if cohorts_df.loc[cohort_idx, "Invited"] else [])
-        initial_len_inv = len(current_cohort_invited)
-        current_cohort_invited.update(employee_ids)
+        initial_len_inv = len(current_cohort_invited - {''})
+        current_cohort_invited.update(employee_ids_to_process)
         cohorts_df.loc[cohort_idx, "Invited"] = ",".join(sorted(list(filter(None, current_cohort_invited))))
-        added_invited_count = len(current_cohort_invited) - initial_len_inv
+        added_invited_count = len(set(filter(None, current_cohort_invited))) - initial_len_inv
 
-    # For Joined
     if mark_joined:
         current_cohort_joined = set(str(cohorts_df.loc[cohort_idx, "Joined"]).split(',') if cohorts_df.loc[cohort_idx, "Joined"] else [])
-        initial_len_join = len(current_cohort_joined)
-        current_cohort_joined.update(employee_ids)
+        initial_len_join = len(current_cohort_joined - {''})
+        current_cohort_joined.update(employee_ids_to_process)
         cohorts_df.loc[cohort_idx, "Joined"] = ",".join(sorted(list(filter(None, current_cohort_joined))))
-        added_joined_count = len(current_cohort_joined) - initial_len_join
+        added_joined_count = len(set(filter(None, current_cohort_joined))) - initial_len_join
 
     # --- Update participants.csv ---
     participants_file_updated = False
-    for emp_id in employee_ids:
+    for emp_id in employee_ids_to_process:
+        if emp_id in absent_ids_set:
+            log_absent_identifier(emp_id)
+
         participant_indices = participants_df[participants_df["Standard ID"] == emp_id].index
         if not participant_indices.empty:
             participant_idx = participant_indices[0]
             participant_row_changed = False
-            action_taken_for_cohort = False
+            action_taken_for_cohort = False # Renamed from action_taken_for_new_participant_cohort to avoid confusion
 
             if mark_nominated:
                 emp_cohorts_nominated = set(str(participants_df.loc[participant_idx, "Cohorts Nominated"]).split(',') if participants_df.loc[participant_idx, "Cohorts Nominated"] else [])
@@ -817,37 +858,51 @@ def update_cohort_membership(cohort_name: str, employee_ids: list[str], mark_nom
                     participant_row_changed = True
                 action_taken_for_cohort = True
             
-            # Add nominated_by_details to Nominated By column if provided
-            if action_taken_for_cohort and nominated_by_details:
+            if action_taken_for_cohort and nominated_by_details: # This implies a cohort action was taken
                 nominated_by_list = [x.strip() for x in str(participants_df.loc[participant_idx, "Nominated By"]).split(",") if x.strip()]
-                if nominated_by_details not in nominated_by_list:
+                if nominated_by_details not in nominated_by_list: # Only add if new
                     nominated_by_list.append(nominated_by_details)
-                    participants_df.loc[participant_idx, "Nominated By"] = ", ".join(nominated_by_list)
+                    participants_df.loc[participant_idx, "Nominated By"] = ", ".join(sorted(list(filter(None, nominated_by_list))))
                     participant_row_changed = True
+            
+            # Update notes if notes_details are provided and a cohort action was taken for this user
+            # This logic might need refinement: Do we append to existing notes, or overwrite?
+            # Current assumption: We are adding to the main "Notes" field, not cohort-specific notes.
+            # Let's assume for now 'notes_details' are cohort-specific and should update the participant's main 'Notes' field.
+            if action_taken_for_cohort and notes_details:
+                current_notes = str(participants_df.loc[participant_idx, "Notes"])
+                # Simple append if new notes are different. A more sophisticated merge might be needed.
+                new_note_entry = f"Cohort '{cohort_name}': {notes_details}"
+                if new_note_entry not in current_notes: # Avoid duplicate note entries
+                    updated_notes = f"{current_notes}\\n{new_note_entry}".strip() if current_notes else new_note_entry
+                    participants_df.loc[participant_idx, "Notes"] = updated_notes
+                    participant_row_changed = True
+
 
             if participant_row_changed:
                 participants_df.loc[participant_idx, "Last Updated"] = current_time
                 participants_file_updated = True
         else:
             # Participant does not exist, create a new entry
-            emp_details = employees_df[employees_df["Standard ID"] == emp_id]
-            email = emp_details["Email"].iloc[0] if not emp_details.empty else ""
+            emp_details = employees_df[employees_df["Standard ID"] == emp_id] # Will be empty for absent IDs
             
+            email_for_new_participant = ""
+            if "@" in emp_id: # If the emp_id itself is an email
+                email_for_new_participant = emp_id
+            elif not emp_details.empty: # It's a valid ID found in employees_df
+                 email_for_new_participant = emp_details["Email"].iloc[0]
+            # If emp_id is a non-email ID not found in employees_df, email_for_new_participant remains ""
+
             new_row_data = {col: "" for col in participants_df.columns}
             new_row_data["Standard ID"] = emp_id
-            new_row_data["Email"] = email
-            if "Waitlist" in new_row_data: new_row_data["Waitlist"] = "No"
-            # Initialize other fields to prevent NaN issues, ensure all are strings
-            for col in ["Events Registered", "Events Participated", "Events Hosted", 
-                        "Cohorts Nominated", "Cohorts Invited", "Cohorts Joined", 
-                        "Nominated By", "Notes", "Tags"]:
-                if col in new_row_data: new_row_data[col] = ""
-
-            # Process cohort updates for the new row data
+            new_row_data["Email"] = email_for_new_participant
+            if "Waitlist" in new_row_data: new_row_data["Waitlist"] = "No" # Default for new entries
+            
             temp_emp_cohorts_nominated = set()
             temp_emp_cohorts_invited = set()
             temp_emp_cohorts_joined = set()
             temp_nominated_by_list = []
+            temp_notes = ""
 
             action_taken_for_new_participant_cohort = False
             if mark_nominated:
@@ -862,15 +917,24 @@ def update_cohort_membership(cohort_name: str, employee_ids: list[str], mark_nom
             
             if action_taken_for_new_participant_cohort and nominated_by_details:
                 temp_nominated_by_list.append(nominated_by_details)
+            
+            if action_taken_for_new_participant_cohort and notes_details:
+                temp_notes = f"Cohort '{cohort_name}': {notes_details}"
+
 
             new_row_data["Cohorts Nominated"] = ",".join(sorted(list(filter(None, temp_emp_cohorts_nominated))))
             new_row_data["Cohorts Invited"] = ",".join(sorted(list(filter(None, temp_emp_cohorts_invited))))
             new_row_data["Cohorts Joined"] = ",".join(sorted(list(filter(None, temp_emp_cohorts_joined))))
-            new_row_data["Nominated By"] = ", ".join(temp_nominated_by_list)
+            new_row_data["Nominated By"] = ", ".join(sorted(list(filter(None, temp_nominated_by_list))))
+            new_row_data["Notes"] = temp_notes
             new_row_data["Last Updated"] = current_time
             
             participants_df = pd.concat([participants_df, pd.DataFrame([new_row_data])], ignore_index=True)
-            st.info(f"Created new entry in participants.csv for {emp_id} while updating cohort '{cohort_name}'.")
+            
+            if emp_id in absent_ids_set:
+                st.info(f"Created new entry in participants.csv for unvalidated identifier {emp_id} while updating cohort '{cohort_name}'.")
+            else:
+                st.info(f"Created new entry in participants.csv for {emp_id} while updating cohort '{cohort_name}'.")
             participants_file_updated = True
 
     save_table("cohorts", cohorts_df)
@@ -1050,192 +1114,206 @@ if table_key == "manage_participation":
         
         if events_df.empty:
             st.warning("No events found. Please add events in the 'Events' section first.")
-        elif employees_df.empty:
-            st.warning("No employees found. Please add employees in the 'Employees' section first.")
+        elif employees_df.empty and participantes_df.empty: # Check if participants is also empty if relying on it
+             st.warning("No employees found in Employees table. Identifiers will be treated as new/unvalidated if not in existing Participants records.")
+        # Allow to proceed if employees_df is empty, as ui_components.employee_selector handles it.
+        
+        # else: # Original condition removed to allow processing if employees_df is empty
+        event_options = {f"{row['Event ID']} - {row['Name']} ({pd.to_datetime(row['Date']).strftime('%Y-%m-%d') if pd.notna(row['Date']) else 'No Date'})": row['Event ID']
+                            for _, row in events_df.sort_values("Date", ascending=False).iterrows()}
+        
+        selected_event_id = None 
+        if not event_options:
+                st.info("No events available to select.")
         else:
-            event_options = {f"{row['Event ID']} - {row['Name']} ({pd.to_datetime(row['Date']).strftime('%Y-%m-%d') if pd.notna(row['Date']) else 'No Date'})": row['Event ID']
-                             for _, row in events_df.sort_values("Date", ascending=False).iterrows()}
-            
-            selected_event_id = None # Initialize selected_event_id
-            if not event_options:
-                 st.info("No events available to select.")
-            else:
-                selected_event_display = st.selectbox(
-                "Select Event",
-                options=list(event_options.keys())
+            selected_event_display = st.selectbox(
+            "Select Event",
+            options=list(event_options.keys())
+        )
+        selected_event_id = event_options.get(selected_event_display)
+
+        st.divider()
+        st.markdown("#### Select Employees")
+        
+        all_event_employee_ids, absent_event_ids = ui_components.employee_selector(
+            employees_df, key_prefix="event_status"
+        )
+
+        st.divider()
+        st.markdown("#### Set Status to Add")
+        set_registered = st.checkbox("Registered", key="set_registered_event")
+        set_participated = st.checkbox("Participated", key="set_participated_event")
+        set_hosted = st.checkbox("Hosted", key="set_hosted_event")
+
+
+        update_button_disabled = not (selected_event_id and all_event_employee_ids and (set_registered or set_participated or set_hosted)) 
+        
+        if st.button("Update Event Status", disabled=update_button_disabled, key="update_event_status_button_new_key_v2"):
+            st.write(f"Processing updates for {len(all_event_employee_ids)} identifier(s) for event {selected_event_id}: Adding Registered={set_registered}, Adding Participated={set_participated}, Adding Hosted={set_hosted}")
+
+            if absent_event_ids:
+                st.warning(f"Note: The following {len(absent_event_ids)} identifier(s) were not found in the main Employees table but will be processed and logged: {', '.join(absent_event_ids)}.")
+
+            newly_added_reg, newly_added_part, newly_added_host = update_employee_event_status(
+                all_event_employee_ids,
+                set(absent_event_ids), # Pass as set for efficient lookup
+                selected_event_id,
+                mark_registered=set_registered,
+                mark_participated=set_participated,
+                mark_hosted=set_hosted
             )
-            selected_event_id = event_options.get(selected_event_display)
-
-            st.divider()
-            st.markdown("#### Select Employees")
-            # Replaced verbose selection UI with reusable component
-            employee_ids_to_process = ui_components.employee_selector(
-                employees_df, key_prefix="event_status"
-            )
-
-            st.divider()
-
-            update_button_disabled = not (selected_event_id and employee_ids_to_process and (set_registered or set_participated or set_hosted)) # Button enabled if any action is true
             
-            if st.button("Update Event Status", disabled=update_button_disabled, key="update_event_status_button_new_key"):
-                st.write(f"Processing updates for {len(employee_ids_to_process)} employee(s) for event {selected_event_id}: Adding Registered={set_registered}, Adding Participated={set_participated}, Adding Hosted={set_hosted}")
+            msg_parts = []
+            if set_registered and newly_added_reg > 0: msg_parts.append(f"{newly_added_reg} newly registered.")
+            elif set_registered: msg_parts.append(f"Registrations: No new additions (already registered or list unchanged).")
+            
+            if set_participated and newly_added_part > 0: msg_parts.append(f"{newly_added_part} newly participated.")
+            elif set_participated: msg_parts.append(f"Participation: No new additions (already participated or list unchanged).")
 
-                newly_added_reg, newly_added_part, newly_added_host = update_employee_event_status(
-                    employee_ids_to_process,
-                    selected_event_id,
-                    mark_registered=set_registered,
-                    mark_participated=set_participated,
-                    mark_hosted=set_hosted
-                )
-                
-                msg_parts = []
-                if set_registered and newly_added_reg > 0: msg_parts.append(f"{newly_added_reg} newly registered.")
-                elif set_registered: msg_parts.append(f"Registrations: No new additions (already registered or list unchanged).")
-                
-                if set_participated and newly_added_part > 0: msg_parts.append(f"{newly_added_part} newly participated.")
-                elif set_participated: msg_parts.append(f"Participation: No new additions (already participated or list unchanged).")
+            if set_hosted and newly_added_host > 0: msg_parts.append(f"{newly_added_host} newly marked as hosted.")
+            elif set_hosted: msg_parts.append(f"Hosted: No new additions (already marked as host or list unchanged).")
+            
+            if not msg_parts and not (set_registered or set_participated or set_hosted):
+                    msg_parts.append("No actions selected.")
+            elif not msg_parts: 
+                msg_parts.append("No new individuals were added to the selected lists (they may have already been on them).")
 
-                if set_hosted and newly_added_host > 0: msg_parts.append(f"{newly_added_host} newly marked as hosted.")
-                elif set_hosted: msg_parts.append(f"Hosted: No new additions (already marked as host or list unchanged).")
-                
-                if not msg_parts and not (set_registered or set_participated or set_hosted):
-                     # This case should ideally be prevented by the disabled button logic
-                     msg_parts.append("No actions selected.")
-                elif not msg_parts: # Some action was selected, but no one was newly added
-                    msg_parts.append("No new individuals were added to the selected lists (they may have already been on them).")
-
-                event_display_str = selected_event_display if selected_event_id else "N/A" # Construct safely
-                final_message = f"Event status update processed for {len(employee_ids_to_process)} employee(s) for event '{event_display_str}'."
-                if msg_parts:
-                    final_message += " Details: " + ' '.join(msg_parts)
-                else: # Should ideally not happen with current logic if button was enabled
-                    final_message += " No specific actions were performed or needed." 
-                
-                st.success(final_message)
-                st.rerun()
+            event_display_str = selected_event_display if selected_event_id and selected_event_display else "N/A" 
+            final_message = f"Event status update processed for {len(all_event_employee_ids)} identifier(s) for event '{event_display_str}'."
+            if msg_parts:
+                final_message += " Details: " + ' '.join(msg_parts)
+            else: 
+                final_message += " No specific actions were performed or needed." 
+            
+            st.success(final_message)
+            st.rerun()
 
     # New expander for bulk updating participant waitlist status and tags
     with st.sidebar.expander("📋 Update Participant Details", expanded=False):
         st.markdown("### Update Waitlist Status & Tags")
         
-        if employees_df.empty:
-            st.warning("No employees found. Please add employees in the 'Employees' section first.")
-        else:
-            st.markdown("#### Select Employees")
-            bulk_employee_ids = ui_components.employee_selector(
-                employees_df, key_prefix="bulk_update"
-            )
+        # if employees_df.empty: # Allow to proceed even if employees_df is empty
+        #     st.warning("No employees found. Please add employees in the 'Employees' section first.")
+        # else:
+        st.markdown("#### Select Employees")
+        bulk_employee_ids, absent_bulk_ids = ui_components.employee_selector(
+            employees_df, key_prefix="bulk_update"
+        )
 
-            st.divider()
+        st.divider()
 
-            st.markdown("#### Set Details to Update")
+        st.markdown("#### Set Details to Update")
 
-            # Waitlist status options
-            waitlist_action = st.radio(
-                "Update Waitlist Status:",
-                ["No Change", "Add to Waitlist", "Remove from Waitlist"],
-                index=0,
-                key="waitlist_action"
-            )
+        waitlist_action = st.radio(
+            "Update Waitlist Status:",
+            ["No Change", "Add to Waitlist", "Remove from Waitlist"],
+            index=0,
+            key="waitlist_action"
+        )
+        
+        tags_to_add = st.text_input(
+            "Add Tags (comma-separated):",
+            help="These tags will be added to existing tags for each employee",
+            key="tags_to_add"
+        )
+        
+        st.divider()
+        
+        update_details_disabled = not (bulk_employee_ids and (waitlist_action != "No Change" or tags_to_add.strip()))
+        
+        if st.button("Update Participant Details", disabled=update_details_disabled, key="update_participant_details_button_v2"):
+            participants_df_bulk = load_table("participants") # Renamed to avoid conflict
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            updates_made = 0
+            waitlist_updates = 0
+            tag_updates = 0
             
-            # Tags input
-            tags_to_add = st.text_input(
-                "Add Tags (comma-separated):",
-                help="These tags will be added to existing tags for each employee",
-                key="tags_to_add"
-            )
-            
-            st.divider()
-            
-            # Update button
-            update_details_disabled = not (bulk_employee_ids and (waitlist_action != "No Change" or tags_to_add.strip()))
-            
-            if st.button("Update Participant Details", disabled=update_details_disabled, key="update_participant_details_button"):
-                participants_df = load_table("participants")
-                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                updates_made = 0
-                waitlist_updates = 0
-                tag_updates = 0
+            absent_bulk_ids_set = set(absent_bulk_ids)
+            if absent_bulk_ids:
+                 st.warning(f"Note: The following {len(absent_bulk_ids)} identifier(s) were not found in the main Employees table but will be processed for creating/updating participant records and logged: {', '.join(absent_bulk_ids)}.")
+
+            for emp_id in bulk_employee_ids:
+                if emp_id in absent_bulk_ids_set:
+                    log_absent_identifier(emp_id)
+
+                participant_indices = participants_df_bulk[participants_df_bulk["Standard ID"] == emp_id].index
+                participant_idx = -1
                 
-                # Process each employee
-                for emp_id in bulk_employee_ids:
-                    # Find or create participant entry
-                    participant_indices = participants_df[participants_df["Standard ID"] == emp_id].index
-                    participant_idx = -1
+                if participant_indices.empty:
+                    emp_details = employees_df[employees_df["Standard ID"] == emp_id]
+                    email_for_new_participant = ""
+                    if "@" in emp_id:
+                        email_for_new_participant = emp_id
+                    elif not emp_details.empty:
+                        email_for_new_participant = emp_details["Email"].iloc[0]
                     
-                    if participant_indices.empty:
-                        # Create new participant record
-                        emp_details = employees_df[employees_df["Standard ID"] == emp_id]
-                        email = emp_details["Email"].iloc[0] if not emp_details.empty else ""
-                        new_row_data = {col: "" for col in participants_df.columns}
-                        new_row_data["Standard ID"] = emp_id
-                        new_row_data["Email"] = email
-                        new_row_data["Waitlist"] = "No"
-                        
-                        participants_df = pd.concat([participants_df, pd.DataFrame([new_row_data])], ignore_index=True)
-                        participant_idx = participants_df[participants_df["Standard ID"] == emp_id].index[0]
-                        st.info(f"Created new entry in participants.csv for {emp_id}")
+                    new_row_data = {col: "" for col in participants_df_bulk.columns}
+                    new_row_data["Standard ID"] = emp_id
+                    new_row_data["Email"] = email_for_new_participant
+                    new_row_data["Waitlist"] = "No" 
+                    
+                    participants_df_bulk = pd.concat([participants_df_bulk, pd.DataFrame([new_row_data])], ignore_index=True)
+                    participant_idx = participants_df_bulk[participants_df_bulk["Standard ID"] == emp_id].index[0]
+                    
+                    if emp_id in absent_bulk_ids_set:
+                        st.info(f"Created new entry in participants.csv for unvalidated identifier: {emp_id}")
                     else:
-                        participant_idx = participant_indices[0]
-                    
-                    row_updated = False
-                    
-                    # Update waitlist status if requested
-                    if waitlist_action != "No Change":
-                        new_waitlist_status = "Yes" if waitlist_action == "Add to Waitlist" else "No"
-                        current_status = str(participants_df.loc[participant_idx, "Waitlist"]).strip().lower()
-                        
-                        # Only update if changing from current state
-                        if (new_waitlist_status.lower() == "yes" and current_status != "yes") or \
-                           (new_waitlist_status.lower() == "no" and current_status == "yes"):
-                            participants_df.loc[participant_idx, "Waitlist"] = new_waitlist_status
-                            row_updated = True
-                            waitlist_updates += 1
-                    
-                    # Add tags if provided
-                    if tags_to_add.strip():
-                        # Get current tags, split, and ensure we have a clean list
-                        current_tags = str(participants_df.loc[participant_idx, "Tags"])
-                        current_tag_list = [tag.strip() for tag in current_tags.split(",") if tag.strip()]
-                        
-                        # Get new tags, split, and ensure we have a clean list
-                        new_tag_list = [tag.strip() for tag in tags_to_add.split(",") if tag.strip()]
-                        
-                        # Add new tags if they don't already exist
-                        added_tags = False
-                        for new_tag in new_tag_list:
-                            if new_tag not in current_tag_list:
-                                current_tag_list.append(new_tag)
-                                added_tags = True
-                        
-                        if added_tags:
-                            # Update the Tags field with the combined list
-                            participants_df.loc[participant_idx, "Tags"] = ", ".join(current_tag_list)
-                            row_updated = True
-                            tag_updates += 1
-                    
-                    # Update timestamp if any changes were made
-                    if row_updated:
-                        participants_df.loc[participant_idx, "Last Updated"] = current_time
-                        updates_made += 1
-                
-                # Save changes if any were made
-                if updates_made > 0:
-                    save_table("participants", participants_df)
-                    
-                    success_msg = []
-                    if waitlist_action != "No Change":
-                        status_text = "added to" if waitlist_action == "Add to Waitlist" else "removed from"
-                        success_msg.append(f"{waitlist_updates} participant(s) {status_text} waitlist")
-                    
-                    if tags_to_add.strip():
-                        success_msg.append(f"{tag_updates} participant(s) had tags added")
-                    
-                    st.success(f"Successfully updated {updates_made} participant(s). {' and '.join(success_msg)}.")
-                    load_table.clear()
-                    st.rerun()
+                        st.info(f"Created new entry in participants.csv for {emp_id}")
                 else:
-                    st.info("No updates were needed. Participants may already have the specified waitlist status or tags.")
+                    participant_idx = participant_indices[0]
+                
+                row_updated = False
+                
+                if waitlist_action != "No Change":
+                    new_waitlist_status = "Yes" if waitlist_action == "Add to Waitlist" else "No"
+                    current_status = str(participants_df_bulk.loc[participant_idx, "Waitlist"]).strip().lower()
+                    
+                    if (new_waitlist_status.lower() == "yes" and current_status != "yes") or \
+                        (new_waitlist_status.lower() == "no" and current_status == "yes"):
+                        participants_df_bulk.loc[participant_idx, "Waitlist"] = new_waitlist_status
+                        row_updated = True
+                        waitlist_updates += 1
+                
+                if tags_to_add.strip():
+                    current_tags = str(participants_df_bulk.loc[participant_idx, "Tags"])
+                    current_tag_list = [tag.strip() for tag in current_tags.split(",") if tag.strip()]
+                    new_tag_list = [tag.strip() for tag in tags_to_add.split(",") if tag.strip()]
+                    
+                    added_tags_this_row = False
+                    for new_tag in new_tag_list:
+                        if new_tag not in current_tag_list:
+                            current_tag_list.append(new_tag)
+                            added_tags_this_row = True
+                    
+                    if added_tags_this_row:
+                        participants_df_bulk.loc[participant_idx, "Tags"] = ", ".join(sorted(list(filter(None, current_tag_list))))
+                        row_updated = True
+                        tag_updates +=1 # Count updates per row where tags were actually added
+                
+                if row_updated:
+                    participants_df_bulk.loc[participant_idx, "Last Updated"] = current_time
+                    updates_made += 1
+            
+            if updates_made > 0:
+                save_table("participants", participants_df_bulk)
+                
+                success_msg_parts = []
+                if waitlist_action != "No Change" and waitlist_updates > 0 :
+                    status_text = "added to" if waitlist_action == "Add to Waitlist" else "removed from"
+                    success_msg_parts.append(f"{waitlist_updates} participant(s) {status_text} waitlist")
+                
+                if tags_to_add.strip() and tag_updates > 0: # tag_updates now counts rows where tags were added
+                    success_msg_parts.append(f"tags added/updated for {tag_updates} participant(s)")
+                
+                final_success_msg = f"Successfully processed details for {updates_made} participant(s)."
+                if success_msg_parts:
+                    final_success_msg += " " + " and ".join(success_msg_parts) + "."
+
+                st.success(final_success_msg)
+                load_table.clear()
+                st.rerun()
+            else:
+                st.info("No updates were needed. Participants may already have the specified waitlist status or tags.")
 
 # --- Other Sections (Employees, Workshops, Cohorts, Events) ---
 else:
@@ -1536,7 +1614,7 @@ else:
 
                 # Input Employee IDs/Emails
                 st.markdown("#### Select Employees")
-                employee_ids_to_process = ui_components.employee_selector(
+                employee_ids_for_cohort, absent_cohort_ids = ui_components.employee_selector(
                     employees_df, key_prefix="cohort_mgmt"
                 )
 
@@ -1544,9 +1622,9 @@ else:
 
                 # Select Membership Type
                 st.markdown("#### Set Membership Status")
-                mark_nominated = st.checkbox("Nominated")
-                mark_invited = st.checkbox("Invited")
-                mark_joined = st.checkbox("Joined")
+                mark_nominated_cohort = st.checkbox("Nominated")
+                mark_invited_cohort = st.checkbox("Invited")
+                mark_joined_cohort = st.checkbox("Joined")
 
                 st.divider()
 
@@ -1556,33 +1634,47 @@ else:
                 st.divider()
 
                 # Update Button
-                if st.button("Update Cohort Membership", disabled=(not selected_cohort_name or not employee_ids_to_process or (not mark_nominated and not mark_invited and not mark_joined))):
+                if st.button("Update Cohort Membership", disabled=(not selected_cohort_name or not employee_ids_for_cohort or (not mark_nominated_cohort and not mark_invited_cohort and not mark_joined_cohort))):
+                    if absent_cohort_ids:
+                         st.warning(f"Note: The following {len(absent_cohort_ids)} identifier(s) were not found in the main Employees table but will be processed for cohort membership and logged: {', '.join(absent_cohort_ids)}.")
+
                     added_nom, added_invited, added_joined = update_cohort_membership(
                         selected_cohort_name,
-                        employee_ids_to_process,
-                        mark_nominated,
-                        mark_invited,
-                        mark_joined,
+                        employee_ids_for_cohort,
+                        set(absent_cohort_ids), # Pass as set for efficient lookup
+                        mark_nominated_cohort,
+                        mark_invited_cohort,
+                        mark_joined_cohort,
                         nominated_by_details=nominated_by_details_input,
                         notes_details=notes_details_input
                     )
                     success_msgs = []
-                    if mark_nominated or mark_invited or mark_joined: # If any action was intended
-                        if added_nom > 0 : success_msgs.append(f"Processed {added_nom} nomination(s).")
-                        if added_invited > 0 : success_msgs.append(f"Processed {added_invited} invitation(s).")
-                        if added_joined > 0 : success_msgs.append(f"Processed {added_joined} join(s).")
+                    # Check if any action was intended by the user
+                    action_intended = mark_nominated_cohort or mark_invited_cohort or mark_joined_cohort
+                    
+                    if action_intended:
+                        if mark_nominated_cohort and added_nom > 0 : success_msgs.append(f"{added_nom} newly nominated.")
+                        elif mark_nominated_cohort: success_msgs.append("Nominations: No new additions.")
 
-                        if nominated_by_details_input or notes_details_input:
-                            success_msgs.append("Nomination/membership details updated for affected employees.")
+                        if mark_invited_cohort and added_invited > 0 : success_msgs.append(f"{added_invited} newly invited.")
+                        elif mark_invited_cohort: success_msgs.append("Invitations: No new additions.")
                         
-                        if not success_msgs: # If counts were 0 but actions were true
+                        if mark_joined_cohort and added_joined > 0 : success_msgs.append(f"{added_joined} newly joined.")
+                        elif mark_joined_cohort: success_msgs.append("Joins: No new additions.")
+
+                        if (nominated_by_details_input or notes_details_input) and (added_nom > 0 or added_invited > 0 or added_joined > 0 or (len(employee_ids_for_cohort) > 0 and action_intended)):
+                            success_msgs.append("Participant details (Nominated By/Notes) updated where applicable.")
+                        
+                        if not success_msgs and action_intended: # If counts were 0 but actions were true
                             success_msgs.append("No new additions to lists (employees may already be on them or details already current).")
 
                     if success_msgs:
-                        st.success(f"Successfully updated cohort '{selected_cohort_name}'. {' '.join(success_msgs)}")
+                        st.success(f"Successfully processed cohort '{selected_cohort_name}' for {len(employee_ids_for_cohort)} identifier(s). {' '.join(success_msgs)}")
                         st.rerun()
-                    else: # This case should ideally not be hit if button logic is correct
-                        st.info("No changes made or no actions selected.")
+                    elif not action_intended:
+                        st.info("No membership actions (Nominated, Invited, Joined) were selected.")
+                    else: 
+                        st.info(f"No changes made to cohort '{selected_cohort_name}'. Employees may already be on the lists or details current.")
 
     # Standard editor for other sections
     else:
