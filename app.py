@@ -6,6 +6,7 @@ import io # Needed for file uploads
 import shutil # For file operations
 import json # For version control
 from typing import Union # Import Union
+import ui_components  # Reusable Streamlit components
 
 ###############################################################################
 # Version Control & Migration
@@ -963,61 +964,11 @@ if table_key == "manage_participation":
 
             st.divider()
             st.markdown("#### Select Employees")
-            employee_ids_to_process = []
+            # Replaced verbose selection UI with reusable component
+            employee_ids_to_process = ui_components.employee_selector(
+                employees_df, key_prefix="event_status"
+            )
 
-            tab_paste, tab_select, tab_upload = st.tabs(["Paste List", "Select from List", "Upload File"])
-
-            with tab_paste:
-                pasted_list = st.text_area("Paste Standard IDs or Emails (one per line)", key="participants_paste_new")
-                if pasted_list:
-                    valid_ids, invalid_inputs = get_employee_ids_from_input(pasted_list, employees_df)
-                    if valid_ids: 
-                        st.write(f"Found {len(valid_ids)} valid employee(s).")
-                        employee_ids_to_process.extend(valid_ids) # Use extend for multiple sources
-                    if invalid_inputs: 
-                        st.warning(f"Could not find/validate: {', '.join(invalid_inputs)}")
-
-            with tab_select:
-                employee_display_options = [f"{row['Standard ID']} - {row['Email']}"
-                                            for _, row in employees_df.iterrows()]
-                selected_employees_multi = st.multiselect(
-                    "Select Employees",
-                    options=employee_display_options,
-                    key="participants_multiselect_new"
-                )
-                if selected_employees_multi:
-                    ids_from_select = [opt.split(' - ')[0] for opt in selected_employees_multi]
-                    # Add only if not already added from paste tab (to avoid duplicates if user uses multiple tabs)
-                    for item_id in ids_from_select:
-                        if item_id not in employee_ids_to_process:
-                            employee_ids_to_process.append(item_id)
-
-            with tab_upload:
-                uploaded_file = st.file_uploader("Upload .txt or .csv (one ID/email per line)", type=["txt", "csv"], key="participants_upload_new")
-                if uploaded_file is not None:
-                    stringio = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
-                    file_content = stringio.read()
-                    valid_ids_file, invalid_inputs_file = get_employee_ids_from_input(file_content, employees_df)
-                    if valid_ids_file: 
-                        st.write(f"Found {len(valid_ids_file)} valid employee(s) from file.")
-                        for item_id in valid_ids_file:
-                             if item_id not in employee_ids_to_process:
-                                employee_ids_to_process.append(item_id)
-                    if invalid_inputs_file: 
-                        st.warning(f"Could not find/validate from file: {', '.join(invalid_inputs_file)}")
-            
-            # Remove duplicates just in case, preserving order as much as possible
-            if employee_ids_to_process:
-                employee_ids_to_process = sorted(list(set(employee_ids_to_process)), key=employee_ids_to_process.index)
-
-            st.divider()
-            st.markdown("#### Set Participation Status for Selected Event")
-            
-            # Stack checkboxes vertically instead of in columns
-            set_registered = st.checkbox("Registered", key="set_registered_event_new_key")
-            set_participated = st.checkbox("Participated", key="set_participated_event_new_key")
-            set_hosted = st.checkbox("Hosted", key="set_hosted_event_new_key")
-            # Removed the caption
             st.divider()
 
             update_button_disabled = not (selected_event_id and employee_ids_to_process and (set_registered or set_participated or set_hosted)) # Button enabled if any action is true
@@ -1067,56 +1018,14 @@ if table_key == "manage_participation":
             st.warning("No employees found. Please add employees in the 'Employees' section first.")
         else:
             st.markdown("#### Select Employees")
-            bulk_employee_ids = []
-
-            bulk_tab_paste, bulk_tab_select, bulk_tab_upload = st.tabs(["Paste List", "Select from List", "Upload File"])
-
-            with bulk_tab_paste:
-                bulk_pasted_list = st.text_area("Paste Standard IDs or Emails (one per line)", key="bulk_participants_paste")
-                if bulk_pasted_list:
-                    valid_ids, invalid_inputs = get_employee_ids_from_input(bulk_pasted_list, employees_df)
-                    if valid_ids:
-                        st.write(f"Found {len(valid_ids)} valid employee(s).")
-                        bulk_employee_ids.extend(valid_ids)
-                    if invalid_inputs:
-                        st.warning(f"Could not find/validate: {', '.join(invalid_inputs)}")
-
-            with bulk_tab_select:
-                employee_display_options = [f"{row['Standard ID']} - {row['Email']}"
-                                           for _, row in employees_df.iterrows()]
-                bulk_selected_employees = st.multiselect(
-                    "Select Employees",
-                    options=employee_display_options,
-                    key="bulk_participants_multiselect"
-                )
-                if bulk_selected_employees:
-                    ids_from_select = [opt.split(' - ')[0] for opt in bulk_selected_employees]
-                    for item_id in ids_from_select:
-                        if item_id not in bulk_employee_ids:
-                            bulk_employee_ids.append(item_id)
-
-            with bulk_tab_upload:
-                bulk_uploaded_file = st.file_uploader("Upload .txt or .csv (one ID/email per line)", type=["txt", "csv"], key="bulk_participants_upload")
-                if bulk_uploaded_file is not None:
-                    stringio = io.StringIO(bulk_uploaded_file.getvalue().decode("utf-8"))
-                    file_content = stringio.read()
-                    valid_ids_file, invalid_inputs_file = get_employee_ids_from_input(file_content, employees_df)
-                    if valid_ids_file:
-                        st.write(f"Found {len(valid_ids_file)} valid employee(s) from file.")
-                        for item_id in valid_ids_file:
-                            if item_id not in bulk_employee_ids:
-                                bulk_employee_ids.append(item_id)
-                    if invalid_inputs_file:
-                        st.warning(f"Could not find/validate from file: {', '.join(invalid_inputs_file)}")
-            
-            # Remove duplicates just in case, preserving order as much as possible
-            if bulk_employee_ids:
-                bulk_employee_ids = sorted(list(set(bulk_employee_ids)), key=bulk_employee_ids.index)
-                st.write(f"**Total unique employees selected:** {len(bulk_employee_ids)}")
+            bulk_employee_ids = ui_components.employee_selector(
+                employees_df, key_prefix="bulk_update"
+            )
 
             st.divider()
+
             st.markdown("#### Set Details to Update")
-            
+
             # Waitlist status options
             waitlist_action = st.radio(
                 "Update Waitlist Status:",
@@ -1446,40 +1355,9 @@ else:
 
                 # Input Employee IDs/Emails
                 st.markdown("#### Select Employees")
-                input_method = st.tabs(["Paste List", "Select from List", "Upload File"])
-                employee_ids_to_process = []
-                invalid_inputs_detected = []
-
-                with input_method[0]: # Paste List
-                    pasted_list = st.text_area("Paste Standard IDs or Emails (one per line)", key="cohort_paste")
-                    if pasted_list:
-                        employee_ids_to_process, invalid_inputs_detected = get_employee_ids_from_input(pasted_list, employees_df)
-                        st.write(f"Found {len(employee_ids_to_process)} valid employee(s).")
-                        if invalid_inputs_detected:
-                            st.warning(f"Could not find/validate: {', '.join(invalid_inputs_detected)}")
-
-                with input_method[1]: # Select from List
-                    employee_display_options = [f"{row['Standard ID']} - {row['Email']}"
-                                                for _, row in employees_df.iterrows()]
-                    selected_employees_from_multiselect_cohorts = st.multiselect(
-                        "Select Employees",
-                        options=employee_display_options,
-                        key="cohort_multiselect_input"
-                    )
-                    if selected_employees_from_multiselect_cohorts:
-                        # If employee_ids_to_process is empty (i.e., not filled by paste/upload), then use these.
-                        if not employee_ids_to_process:
-                            employee_ids_to_process = [opt.split(' - ')[0] for opt in selected_employees_from_multiselect_cohorts]
-
-                with input_method[2]: # Upload File
-                    uploaded_file = st.file_uploader("Upload .txt or .csv (one ID/email per line)", type=["txt", "csv"], key="cohort_upload")
-                    if uploaded_file is not None:
-                        stringio = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
-                        file_content = stringio.read()
-                        employee_ids_to_process, invalid_inputs_detected = get_employee_ids_from_input(file_content, employees_df)
-                        st.write(f"Found {len(employee_ids_to_process)} valid employee(s).")
-                        if invalid_inputs_detected:
-                            st.warning(f"Could not find/validate: {', '.join(invalid_inputs_detected)}")
+                employee_ids_to_process = ui_components.employee_selector(
+                    employees_df, key_prefix="cohort_mgmt"
+                )
 
                 st.divider()
 
