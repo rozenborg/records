@@ -11,7 +11,7 @@ import ui_components  # Reusable Streamlit components
 ###############################################################################
 # Version Control & Migration
 ###############################################################################
-APP_VERSION = "1.2.2"  # Current app version
+APP_VERSION = "1.2.3"  # Current app version
 VERSION_FILE = "version.json"  # Stores schema version info
 BACKUP_DIR = "backups"  # Directory for data backups
 
@@ -61,7 +61,8 @@ def run_migrations(from_version, to_version):
         '1.0.0->1.1.0': migrate_from_1_0_0_to_1_1_0,
         '1.1.0->1.2.0': migrate_from_1_1_0_to_1_2_0, # New participant data structure
         '1.2.0->1.2.1': migrate_from_1_2_0_to_1_2_1,
-        '1.2.1->1.2.2': migrate_from_1_2_1_to_1_2_2
+        '1.2.1->1.2.2': migrate_from_1_2_1_to_1_2_2,
+        '1.2.2->1.2.3': migrate_from_1_2_2_to_1_2_3
     }
     
     # Execute appropriate migration based on version transition
@@ -392,6 +393,45 @@ def migrate_from_1_2_1_to_1_2_2():
         st.error(f"Migration to v1.2.2 ('Tags' column) failed: {str(e)}")
         raise
 
+# Migration for version 1.2.3: Adds 'Nomination Notes' and 'Cohort Membership Details' to participants
+def migrate_from_1_2_2_to_1_2_3():
+    """Migration from v1.2.2 to v1.2.3:
+    - Adds 'Notes' (string) to participants.csv.
+    - Removes 'Cohort Membership Details' column if present.
+    """
+    st.info("Starting migration to v1.2.3 for 'Notes' column and removing 'Cohort Membership Details'...")
+    try:
+        participants_path = _path_for("participants")
+        if os.path.exists(participants_path):
+            participants_df = pd.read_csv(participants_path, dtype=str, na_filter=False).fillna("")
+            changes_made = False
+            # Rename 'Nomination Notes' to 'Notes' if present
+            if "Nomination Notes" in participants_df.columns:
+                participants_df = participants_df.rename(columns={"Nomination Notes": "Notes"})
+                st.info("Renamed 'Nomination Notes' column to 'Notes' in participants.csv.")
+                changes_made = True
+            # Add 'Notes' if not present
+            if "Notes" not in participants_df.columns:
+                participants_df["Notes"] = ""
+                st.info("Added 'Notes' column to participants.csv.")
+                changes_made = True
+            # Remove 'Cohort Membership Details' if present
+            if "Cohort Membership Details" in participants_df.columns:
+                participants_df = participants_df.drop(columns=["Cohort Membership Details"])
+                st.info("Removed 'Cohort Membership Details' column from participants.csv.")
+                changes_made = True
+            if changes_made:
+                participants_df.to_csv(participants_path, index=False)
+                st.info("participants.csv updated by migration to v1.2.3")
+        else:
+            st.warning("participants.csv not found during migration 1.2.2->1.2.3. If this is a fresh install, it will be created with the new schema on first load.")
+        
+        st.success("Successfully migrated to v1.2.3.")
+        load_table.clear()
+    except Exception as e:
+        st.error(f"Migration to v1.2.3 ('Notes', remove 'Cohort Membership Details') failed: {str(e)}")
+        raise
+
 ###############################################################################
 # Configuration
 ###############################################################################
@@ -433,11 +473,12 @@ FILES = {
         "Events Registered",    # Comma-separated Event IDs
         "Events Participated",  # Comma-separated Event IDs
         "Events Hosted",        # Comma-separated Event IDs
-        "Waitlist",             # "Yes" or "No"
+        "Waitlist",             # "Yes" or "No" - This was 'On General Waitlist' previously, let's check if I should rename in FILES or if migration handled it. Assuming 'Waitlist' is the canonical now.
         "Cohorts Nominated",    # Comma-separated Cohort Names
         "Cohorts Invited",      # Comma-separated Cohort Names
         "Cohorts Joined",       # Comma-separated Cohort Names
         "Nominated By",         # Comma-separated Employee Emails/IDs
+        "Notes",                # General notes for this participant
         "Tags",                 # Comma-separated string of tags
         "Last Updated"          # Timestamp
     ])
@@ -695,13 +736,16 @@ def update_employee_event_status(employee_ids: list[str], event_id: str, mark_re
     return newly_registered_count, newly_participated_count, newly_hosted_count
 
 
-def update_cohort_membership(cohort_name: str, employee_ids: list[str], mark_nominated: bool, mark_invited: bool, mark_joined: bool) -> tuple[int, int, int]:
-    """Adds employee IDs to the Nominated, Invited, and/or Joined fields for a given cohort."""
+def update_cohort_membership(cohort_name: str, employee_ids: list[str], mark_nominated: bool, mark_invited: bool, mark_joined: bool, nominated_by_details: str = "", notes_details: str = "") -> tuple[int, int, int]:
+    """Adds employee IDs to the Nominated, Invited, and/or Joined fields for a given cohort.
+    Updates Cohort Membership Details in participants.csv with nominated_by and notes information.
+    """
     if not cohort_name or not employee_ids or (not mark_nominated and not mark_invited and not mark_joined):
         return 0, 0, 0 # Nothing to do
 
     cohorts_df = load_table("cohorts")
     participants_df = load_table("participants") # Load participants.csv
+    employees_df = load_table("employees") # Load employees for email lookup
     # load_table.clear() # Clear after all reads, before writes, or at the very end.
 
     cohort_index_list = cohorts_df.index[cohorts_df["Name"] == cohort_name].tolist()
@@ -747,6 +791,7 @@ def update_cohort_membership(cohort_name: str, employee_ids: list[str], mark_nom
         if not participant_indices.empty:
             participant_idx = participant_indices[0]
             participant_row_changed = False
+            action_taken_for_cohort = False
 
             if mark_nominated:
                 emp_cohorts_nominated = set(str(participants_df.loc[participant_idx, "Cohorts Nominated"]).split(',') if participants_df.loc[participant_idx, "Cohorts Nominated"] else [])
@@ -754,6 +799,7 @@ def update_cohort_membership(cohort_name: str, employee_ids: list[str], mark_nom
                     emp_cohorts_nominated.add(cohort_name)
                     participants_df.loc[participant_idx, "Cohorts Nominated"] = ",".join(sorted(list(filter(None, emp_cohorts_nominated))))
                     participant_row_changed = True
+                action_taken_for_cohort = True 
             
             if mark_invited:
                 emp_cohorts_invited = set(str(participants_df.loc[participant_idx, "Cohorts Invited"]).split(',') if participants_df.loc[participant_idx, "Cohorts Invited"] else [])
@@ -761,6 +807,7 @@ def update_cohort_membership(cohort_name: str, employee_ids: list[str], mark_nom
                     emp_cohorts_invited.add(cohort_name)
                     participants_df.loc[participant_idx, "Cohorts Invited"] = ",".join(sorted(list(filter(None, emp_cohorts_invited))))
                     participant_row_changed = True
+                action_taken_for_cohort = True
 
             if mark_joined:
                 emp_cohorts_joined = set(str(participants_df.loc[participant_idx, "Cohorts Joined"]).split(',') if participants_df.loc[participant_idx, "Cohorts Joined"] else [])
@@ -768,12 +815,63 @@ def update_cohort_membership(cohort_name: str, employee_ids: list[str], mark_nom
                     emp_cohorts_joined.add(cohort_name)
                     participants_df.loc[participant_idx, "Cohorts Joined"] = ",".join(sorted(list(filter(None, emp_cohorts_joined))))
                     participant_row_changed = True
+                action_taken_for_cohort = True
             
+            # Add nominated_by_details to Nominated By column if provided
+            if action_taken_for_cohort and nominated_by_details:
+                nominated_by_list = [x.strip() for x in str(participants_df.loc[participant_idx, "Nominated By"]).split(",") if x.strip()]
+                if nominated_by_details not in nominated_by_list:
+                    nominated_by_list.append(nominated_by_details)
+                    participants_df.loc[participant_idx, "Nominated By"] = ", ".join(nominated_by_list)
+                    participant_row_changed = True
+
             if participant_row_changed:
                 participants_df.loc[participant_idx, "Last Updated"] = current_time
                 participants_file_updated = True
         else:
-            st.warning(f"Employee ID {emp_id} not found in participants.csv. Cannot update their cohort status in participants.csv. Employee might be new or migration might be needed if this is unexpected.")
+            # Participant does not exist, create a new entry
+            emp_details = employees_df[employees_df["Standard ID"] == emp_id]
+            email = emp_details["Email"].iloc[0] if not emp_details.empty else ""
+            
+            new_row_data = {col: "" for col in participants_df.columns}
+            new_row_data["Standard ID"] = emp_id
+            new_row_data["Email"] = email
+            if "Waitlist" in new_row_data: new_row_data["Waitlist"] = "No"
+            # Initialize other fields to prevent NaN issues, ensure all are strings
+            for col in ["Events Registered", "Events Participated", "Events Hosted", 
+                        "Cohorts Nominated", "Cohorts Invited", "Cohorts Joined", 
+                        "Nominated By", "Notes", "Tags"]:
+                if col in new_row_data: new_row_data[col] = ""
+
+            # Process cohort updates for the new row data
+            temp_emp_cohorts_nominated = set()
+            temp_emp_cohorts_invited = set()
+            temp_emp_cohorts_joined = set()
+            temp_nominated_by_list = []
+
+            action_taken_for_new_participant_cohort = False
+            if mark_nominated:
+                temp_emp_cohorts_nominated.add(cohort_name)
+                action_taken_for_new_participant_cohort = True
+            if mark_invited:
+                temp_emp_cohorts_invited.add(cohort_name)
+                action_taken_for_new_participant_cohort = True
+            if mark_joined:
+                temp_emp_cohorts_joined.add(cohort_name)
+                action_taken_for_new_participant_cohort = True
+            
+            if action_taken_for_new_participant_cohort and nominated_by_details:
+                temp_nominated_by_list.append(nominated_by_details)
+
+            new_row_data["Cohorts Nominated"] = ",".join(sorted(list(filter(None, temp_emp_cohorts_nominated))))
+            new_row_data["Cohorts Invited"] = ",".join(sorted(list(filter(None, temp_emp_cohorts_invited))))
+            new_row_data["Cohorts Joined"] = ",".join(sorted(list(filter(None, temp_emp_cohorts_joined))))
+            new_row_data["Nominated By"] = ", ".join(temp_nominated_by_list)
+            new_row_data["Last Updated"] = current_time
+            
+            participants_df = pd.concat([participants_df, pd.DataFrame([new_row_data])], ignore_index=True)
+            st.info(f"Created new entry in participants.csv for {emp_id} while updating cohort '{cohort_name}'.")
+            participants_file_updated = True
 
     save_table("cohorts", cohorts_df)
     if participants_file_updated:
@@ -842,9 +940,10 @@ if table_key == "manage_participation":
             "Cohorts Nominated": st.column_config.TextColumn("Cohorts Nominated (Names)", help="Managed via \'Cohorts\' section.", disabled=True),
             "Cohorts Invited": st.column_config.TextColumn("Cohorts Invited (Names)", help="Managed via \'Cohorts\' section.", disabled=True),
             "Cohorts Joined": st.column_config.TextColumn("Cohorts Joined (Names)", help="Managed via \'Cohorts\' section.", disabled=True),
-            "Nominated By": st.column_config.TextColumn("Nominated By (Email/ID)", help="Manually enter who nominated this participant for any program/cohort."),
+            "Nominated By": st.column_config.TextColumn("Nominated By (Email/ID)", help="Comma-separated list of nominators for any cohort (auto-updated when adding to cohorts, editable here)."),
+            "Notes": st.column_config.TextColumn("Notes", help="General notes about this participant (not cohort-specific)."),
             "Tags": st.column_config.TextColumn("Tags", help="Comma-separated tags (e.g., Working Group Lead, Offering Support)"),
-                "Last Updated": st.column_config.TextColumn("Last Updated", disabled=True)
+            "Last Updated": st.column_config.TextColumn("Last Updated", disabled=True)
             }
 
         for col_key in FILES["participants"][1]:
@@ -885,6 +984,10 @@ if table_key == "manage_participation":
                         current_participants_on_disk.loc[original_row_idx, "Nominated By"] = edited_row["Nominated By"]
                         row_changed_in_editor = True
                     
+                    if current_participants_on_disk.loc[original_row_idx, "Notes"] != edited_row["Notes"]:
+                        current_participants_on_disk.loc[original_row_idx, "Notes"] = edited_row["Notes"]
+                        row_changed_in_editor = True
+                    
                     # Handle 'Waitlist' checkbox state
                     current_waitlist_status_str = str(current_participants_on_disk.loc[original_row_idx, "Waitlist"]).lower() == "yes"
                     editor_waitlist_status_bool = bool(edited_row["Waitlist"])
@@ -916,6 +1019,7 @@ if table_key == "manage_participation":
                     # Ensure 'Waitlist' from editor is correctly converted for new row
                     new_row_data["Waitlist"] = "Yes" if bool(edited_row.get("Waitlist", False)) else "No"
                     new_row_data["Tags"] = edited_row.get("Tags", "") # Add Tags for new row
+                    new_row_data["Notes"] = edited_row.get("Notes", "") # Add Notes for new row
                     new_row_data["Last Updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     
                     current_participants_on_disk = pd.concat([current_participants_on_disk, pd.DataFrame([new_row_data])], ignore_index=True)
@@ -1265,14 +1369,54 @@ else:
                     st.rerun()
 
         if st.button("💾  Save", key=f"save_{table_key}"):
-            if len(df) > 1000:
-                df.iloc[start_idx:end_idx] = edited_df
-                save_table(table_key, df)
+            # df is the original full DataFrame for this section when the view was loaded
+            # ... (logic to construct df_to_save using edited_df_subset and df) ...
+            # The following lines (approx 1481-1499 in original) correctly build df_to_save
+            current_df_with_displayed_columns = None
+            if len(df_for_display) > 1000: # PAGINATED CASE
+                part_before = df_for_display.iloc[:start_idx].reset_index(drop=True)
+                part_after = df_for_display.iloc[end_idx:].reset_index(drop=True)
+                
+                current_df_with_displayed_columns = pd.concat([
+                    part_before, 
+                    edited_df.reset_index(drop=True), # This is the edited page
+                    part_after
+                ], ignore_index=True)
+            else: # NON-PAGINATED CASE
+                current_df_with_displayed_columns = edited_df.reset_index(drop=True)
+
+            df_to_save = current_df_with_displayed_columns.copy()
+
+            for original_col_name in df.columns:
+                if original_col_name not in df_to_save.columns:
+                    if original_col_name in df:
+                        df_to_save[original_col_name] = df[original_col_name].reindex(df_to_save.index)
+                    else: # Should not happen if df.columns is accurate
+                        df_to_save[original_col_name] = pd.Series(index=df_to_save.index, dtype='object')
+
+            df_to_save = df_to_save.fillna("")
+            df_to_save = df_to_save.reindex(columns=df.columns, fill_value="")
+
+            # Now, compare df (original loaded data for the section) with df_to_save
+            changes_made = False
+            if df.shape != df_to_save.shape:
+                changes_made = True
             else:
-                save_table(table_key, edited_df)
-            st.success("Table changes saved to disk.")
-            load_table.clear()
-            st.rerun()
+                # DataFrame.equals checks for same shape, columns, dtypes, index, and values.
+                # Both df (from load_table) and df_to_save have had fillna("") applied.
+                if not df.equals(df_to_save):
+                    changes_made = True
+            
+            if changes_made:
+                save_table(table_key, df_to_save)
+                st.success(f"{section_label} saved to disk.") # Using section_label for specific feedback
+                load_table.clear() # Clear cache after saving
+                if table_key == "workshops":
+                    st.session_state["workshops_editor_version"] += 1
+                st.rerun()
+            else:
+                st.info(f"No changes detected in {section_label}.")
+
 
     # Custom section for Cohorts
     elif table_key == "cohorts":
@@ -1301,14 +1445,51 @@ else:
 
         # Save Button for Table Edits
         if st.button("💾  Save", key=f"save_{table_key}"):
-             if len(df) > 1000:
-                df.iloc[start_idx:end_idx] = edited_df
-                save_table(table_key, df)
-             else:
-                 save_table(table_key, edited_df) # Save directly if not paginated
-             st.success("Table changes saved to disk.")
-             load_table.clear()
-             st.rerun()
+            # df is the original full DataFrame for this section when the view was loaded
+            # ... (logic to construct df_to_save using edited_df_subset and df) ...
+            # The following lines (approx 1481-1499 in original) correctly build df_to_save
+            current_df_with_displayed_columns = None
+            if len(df_for_display) > 1000: # PAGINATED CASE
+                part_before = df_for_display.iloc[:start_idx].reset_index(drop=True)
+                part_after = df_for_display.iloc[end_idx:].reset_index(drop=True)
+                
+                current_df_with_displayed_columns = pd.concat([
+                    part_before, 
+                    edited_df.reset_index(drop=True), # This is the edited page
+                    part_after
+                ], ignore_index=True)
+            else: # NON-PAGINATED CASE
+                current_df_with_displayed_columns = edited_df.reset_index(drop=True)
+
+            df_to_save = current_df_with_displayed_columns.copy()
+
+            for original_col_name in df.columns:
+                if original_col_name not in df_to_save.columns:
+                    if original_col_name in df:
+                        df_to_save[original_col_name] = df[original_col_name].reindex(df_to_save.index)
+                    else: # Should not happen if df.columns is accurate
+                        df_to_save[original_col_name] = pd.Series(index=df_to_save.index, dtype='object')
+
+            df_to_save = df_to_save.fillna("")
+            df_to_save = df_to_save.reindex(columns=df.columns, fill_value="")
+
+            # Now, compare df (original loaded data for the section) with df_to_save
+            changes_made = False
+            if df.shape != df_to_save.shape:
+                changes_made = True
+            else:
+                # DataFrame.equals checks for same shape, columns, dtypes, index, and values.
+                # Both df (from load_table) and df_to_save have had fillna("") applied.
+                if not df.equals(df_to_save):
+                    changes_made = True
+            
+            if changes_made:
+                save_table(table_key, df_to_save)
+                st.success(f"{section_label} saved to disk.") # Using section_label for specific feedback
+                load_table.clear() # Clear cache after saving
+                st.rerun()
+            else:
+                st.info(f"No changes detected in {section_label}.")
 
         # Sidebar: Add-new-cohort form wrapped in an expander for tidier layout
         with st.sidebar.expander("➕ Add New Cohort", expanded=False):
@@ -1369,6 +1550,11 @@ else:
 
                 st.divider()
 
+                nominated_by_details_input = st.text_input("Nominated by")
+                notes_details_input = st.text_area("Notes")
+
+                st.divider()
+
                 # Update Button
                 if st.button("Update Cohort Membership", disabled=(not selected_cohort_name or not employee_ids_to_process or (not mark_nominated and not mark_invited and not mark_joined))):
                     added_nom, added_invited, added_joined = update_cohort_membership(
@@ -1376,21 +1562,27 @@ else:
                         employee_ids_to_process,
                         mark_nominated,
                         mark_invited,
-                        mark_joined
+                        mark_joined,
+                        nominated_by_details=nominated_by_details_input,
+                        notes_details=notes_details_input
                     )
                     success_msgs = []
-                    if mark_nominated:
-                         success_msgs.append(f"Added {added_nom} new nomination(s).")
-                    if mark_invited:
-                         success_msgs.append(f"Added {added_invited} new invitation(s).")
-                    if mark_joined:
-                        success_msgs.append(f"Added {added_joined} new member(s) to cohort.")
+                    if mark_nominated or mark_invited or mark_joined: # If any action was intended
+                        if added_nom > 0 : success_msgs.append(f"Processed {added_nom} nomination(s).")
+                        if added_invited > 0 : success_msgs.append(f"Processed {added_invited} invitation(s).")
+                        if added_joined > 0 : success_msgs.append(f"Processed {added_joined} join(s).")
+
+                        if nominated_by_details_input or notes_details_input:
+                            success_msgs.append("Nomination/membership details updated for affected employees.")
+                        
+                        if not success_msgs: # If counts were 0 but actions were true
+                            success_msgs.append("No new additions to lists (employees may already be on them or details already current).")
 
                     if success_msgs:
                         st.success(f"Successfully updated cohort '{selected_cohort_name}'. {' '.join(success_msgs)}")
                         st.rerun()
-                    else:
-                        st.info("No changes made (employees might already have the selected status or cohort name not found).")
+                    else: # This case should ideally not be hit if button logic is correct
+                        st.info("No changes made or no actions selected.")
 
     # Standard editor for other sections
     else:
@@ -1407,10 +1599,11 @@ else:
             use_container_width=True
         )
         if st.button("💾  Save", key=f"save_{table_key}"):
-            # df is the original full DataFrame loaded from load_table()
+            # df is the original full DataFrame loaded from load_table() for this section
             # df_for_display is df[displayed_columns] (original data, subset of columns)
-            # edited_df_subset is the result of st.data_editor on df_display_paginated (a page or full, with displayed_columns and dynamic rows)
+            # edited_df_subset is the result of st.data_editor on df_display_paginated
 
+            # --- Start: Reconstruct df_to_save (this logic should be largely the same as before) ---
             current_df_with_displayed_columns = None
             if len(df_for_display) > 1000: # PAGINATED CASE
                 part_before = df_for_display.iloc[:start_idx].reset_index(drop=True)
@@ -1422,36 +1615,41 @@ else:
                     part_after
                 ], ignore_index=True)
             else: # NON-PAGINATED CASE
-                # edited_df_subset is the full table (but with only displayed_columns), edited.
                 current_df_with_displayed_columns = edited_df_subset.reset_index(drop=True)
 
-            # Now, current_df_with_displayed_columns has the correct rows and includes only the displayed_columns.
-            # We need to build df_to_save, which will have ALL original columns.
             df_to_save = current_df_with_displayed_columns.copy()
 
-            for original_col_name in df.columns: # Iterate over all column names from the original full df
-                if original_col_name not in df_to_save.columns: # If this column is not in our current (displayed_columns only) df
-                    # This means it's a non-displayed column. We need to add it.
-                    # Get its values from the original 'df', aligned by the new index of df_to_save.
-                    # Rows in df_to_save that are new (not in original df.index) will get NaN.
-                    if original_col_name in df: # Check if column exists in original df
+            for original_col_name in df.columns:
+                if original_col_name not in df_to_save.columns: 
+                    if original_col_name in df: 
                         df_to_save[original_col_name] = df[original_col_name].reindex(df_to_save.index)
-                    else: # Should not happen if df.columns is accurate
+                    else: 
                         df_to_save[original_col_name] = pd.Series(index=df_to_save.index, dtype='object')
 
-
-            # Fill any NaNs that resulted (e.g., for new rows in non-displayed columns, or if original data was NaN)
             df_to_save = df_to_save.fillna("")
-            
-            # Ensure all original columns are present and in the original order
             df_to_save = df_to_save.reindex(columns=df.columns, fill_value="")
+            # --- End: Reconstruct df_to_save ---
 
-            save_table(table_key, df_to_save)
-            st.success("Saved to disk.")
-            load_table.clear() # Clear cache after saving
-            if table_key == "workshops":
-                st.session_state["workshops_editor_version"] += 1
-            st.rerun()
+            # Now, compare df (original loaded data for the section) with df_to_save
+            changes_made = False
+            if df.shape != df_to_save.shape: # Checks for added/deleted rows
+                changes_made = True
+            else:
+                # DataFrame.equals checks for same shape, columns, dtypes, index, and values.
+                # Both df (from load_table) and df_to_save have had fillna("") applied,
+                # and columns reindexed to match, making them comparable.
+                if not df.equals(df_to_save): # Checks for value changes
+                    changes_made = True
+            
+            if changes_made:
+                save_table(table_key, df_to_save)
+                st.success(f"{section_label} saved to disk.") # Using section_label for specific feedback
+                load_table.clear() # Clear cache after saving
+                if table_key == "workshops": # Preserve special workshop editor logic
+                    st.session_state["workshops_editor_version"] += 1
+                st.rerun()
+            else:
+                st.info(f"No changes detected in {section_label}.")
 
 
     # ---------------------------------------------------------------------------
