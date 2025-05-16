@@ -926,7 +926,7 @@ def update_cohort_membership(cohort_name: str, employee_ids_to_process: list[str
                 temp_emp_cohorts_nominated = set()
                 temp_emp_cohorts_invited = set()
                 temp_emp_cohorts_joined = set()
-                temp_nominated_by_list = []
+                temp_nominated_by_string = "" # Initialize
                 temp_notes = ""
 
                 action_taken_for_new_participant_cohort = False
@@ -941,7 +941,8 @@ def update_cohort_membership(cohort_name: str, employee_ids_to_process: list[str
                     action_taken_for_new_participant_cohort = True
                 
                 if action_taken_for_new_participant_cohort and nominated_by_details:
-                    temp_nominated_by_list.append(nominated_by_details)
+                    nominators_for_new = set(e.strip() for e in nominated_by_details.split(',') if e.strip() and e.strip().lower() != 'nan')
+                    temp_nominated_by_string = ", ".join(sorted(list(n for n in nominators_for_new if n)))
                 
                 if action_taken_for_new_participant_cohort and notes_details:
                     temp_notes = notes_details
@@ -949,7 +950,7 @@ def update_cohort_membership(cohort_name: str, employee_ids_to_process: list[str
                 new_row_data["Cohorts Nominated"] = ",".join(sorted(list(filter(None, temp_emp_cohorts_nominated))))
                 new_row_data["Cohorts Invited"] = ",".join(sorted(list(filter(None, temp_emp_cohorts_invited))))
                 new_row_data["Cohorts Joined"] = ",".join(sorted(list(filter(None, temp_emp_cohorts_joined))))
-                new_row_data["Nominated By"] = ", ".join(sorted(list(filter(None, temp_nominated_by_list))))
+                new_row_data["Nominated By"] = temp_nominated_by_string
                 new_row_data["Notes"] = temp_notes
                 new_row_data["Last Updated"] = current_time
                 
@@ -1652,8 +1653,15 @@ else:
                 mark_joined_cohort = st.checkbox("Joined")
 
                 st.divider()
+                
+                st.markdown("##### Nominated By") 
+                nominated_by_emails_list = ui_components.nominator_selector(
+                    employees_df, key_prefix="cohort_nominator"
+                )
+                nominated_by_details_input = ", ".join(nominated_by_emails_list)
+                if nominated_by_emails_list:
+                    st.caption(f"Nominators to be recorded: {nominated_by_details_input}")
 
-                nominated_by_details_input = st.text_input("Nominated by")
                 notes_details_input = st.text_area("Notes")
 
                 st.divider()

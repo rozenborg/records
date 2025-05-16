@@ -152,4 +152,78 @@ def employee_selector(employees_df: pd.DataFrame, *, key_prefix: str = "") -> Tu
     if unique_processing_ids:
         st.write(f"**Total unique identifiers selected/entered for processing:** {len(unique_processing_ids)}")
     
-    return unique_processing_ids, unique_not_found_ids 
+    return unique_processing_ids, unique_not_found_ids
+
+
+def _parse_emails_from_text_area(raw_text: str) -> Tuple[List[str], List[str]]:
+    """
+    Parses a multiline/comma-separated string of emails.
+    Returns:
+        Tuple[List[str], List[str]]: (valid_emails, invalid_entries)
+    """
+    raw_items = []
+    for line in raw_text.strip().split('\\n'):
+        items = [item.strip() for item in line.split(',')]
+        raw_items.extend(items)
+    
+    raw_items = [item for item in raw_items if item] # Remove empty strings
+    
+    valid_emails = []
+    invalid_entries = []
+    if not raw_items:
+        return [], []
+
+    for item in raw_items:
+        if "@" in item: # Basic validation
+            valid_emails.append(item)
+        else:
+            invalid_entries.append(item)
+    return valid_emails, invalid_entries
+
+
+def nominator_selector(employees_df: pd.DataFrame, *, key_prefix: str = "") -> List[str]:
+    """
+    UI component to select nominators using tabs: select from a list of employees or enter emails manually.
+    Returns a deduplicated list of email strings.
+    """
+    all_emails_collected = []
+    
+    tab_select, tab_paste = st.tabs(["Select from Employee List", "Paste/Enter Emails Manually"])
+
+    with tab_select:
+        if not employees_df.empty and "Email" in employees_df.columns and not employees_df["Email"].dropna().empty:
+            employee_email_options = sorted(list(employees_df["Email"].dropna().unique()))
+            if employee_email_options: # Ensure there are actual emails to select
+                selected_emails_from_list = st.multiselect(
+                    "Select Nominator(s) from Employee List",
+                    options=employee_email_options,
+                    key=f"{key_prefix}_nominator_multiselect_tab", 
+                    help="Select from existing employee emails."
+                )
+                all_emails_collected.extend(selected_emails_from_list)
+            else:
+                st.info("No emails found in the employee list to select from.")
+        else:
+            st.info("Employee data is unavailable or lacks emails for selection. Use the 'Paste/Enter Emails' tab.")
+
+    with tab_paste:
+        pasted_emails_text = st.text_area(
+            "Enter or Paste Nominator Email(s)",
+            key=f"{key_prefix}_nominator_paste_tab", 
+            help="Enter emails separated by commas or new lines. These can be emails not in the employee list."
+        )
+        if pasted_emails_text:
+            parsed_valid_emails, parsed_invalid_entries = _parse_emails_from_text_area(pasted_emails_text)
+            all_emails_collected.extend(parsed_valid_emails)
+            if parsed_invalid_entries:
+                st.warning(f"The following entries from the text area were not recognized as valid emails and will be ignored: {', '.join(parsed_invalid_entries)}")
+
+    # Deduplicate while preserving order of first appearance
+    seen_emails = set()
+    unique_emails = []
+    for email in all_emails_collected:
+        if email not in seen_emails:
+            seen_emails.add(email)
+            unique_emails.append(email)
+            
+    return unique_emails 
