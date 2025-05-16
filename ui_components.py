@@ -6,13 +6,23 @@ from typing import List, Tuple
 
 def _parse_employee_identifiers(raw_text: str, employees_df: pd.DataFrame) -> Tuple[List[str], List[str]]:
     """Given a raw multiline string of IDs or emails, validate them against *employees_df*.
+    Handles both line-by-line and comma-separated formats.
 
     Returns:
         Tuple[List[str], List[str]]: 
             - all_identifiers_to_use: Identifiers for processing. (Standard ID if found, original input if not).
             - inputs_not_found_in_employees: Original inputs not found in employees_df.
     """
-    raw_items = [item.strip() for item in raw_text.strip().split('\n') if item.strip()]
+    # First split by newlines, then by commas, and flatten the list
+    raw_items = []
+    for line in raw_text.strip().split('\n'):
+        # Split by comma and strip whitespace from each item
+        items = [item.strip() for item in line.split(',')]
+        raw_items.extend(items)
+    
+    # Remove empty strings
+    raw_items = [item for item in raw_items if item]
+    
     if not raw_items:
         return [], []
 
@@ -43,7 +53,7 @@ def employee_selector(employees_df: pd.DataFrame, *, key_prefix: str = "") -> Tu
     """Reusable UI component that lets the user select one or more employees.
 
     The component offers:
-    1.  A free-text area where the user can paste IDs/emails (one per line)
+    1.  A free-text area where the user can paste IDs/emails
     2.  A multiselect list of all employees
     3.  An upload widget for a .txt or .csv file containing IDs/emails
 
@@ -67,7 +77,7 @@ def employee_selector(employees_df: pd.DataFrame, *, key_prefix: str = "") -> Tu
         # ---- Paste List tab ----
         with tab_paste:
             pasted_text = st.text_area(
-                "Paste Standard IDs or Emails (one per line)",
+                "Paste Standard IDs or Emails",
                 key=f"{key_prefix}_paste",
             )
             if pasted_text:

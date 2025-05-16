@@ -775,10 +775,13 @@ def update_employee_event_status(employee_ids_to_process: list[str], absent_ids_
     return newly_registered_count, newly_participated_count, newly_hosted_count
 
 
-def update_cohort_membership(cohort_name: str, employee_ids_to_process: list[str], absent_ids_set: set[str], mark_nominated: bool, mark_invited: bool, mark_joined: bool, nominated_by_details: str = "", notes_details: str = "") -> tuple[int, int, int]:
-    """Adds employee IDs to the Nominated, Invited, and/or Joined fields for a given cohort.
+def update_cohort_membership(cohort_name: str, employee_ids_to_process: list[str], absent_ids_set: set[str], mark_nominated: bool, mark_invited: bool, mark_joined: bool, nominated_by_details: str = "", notes_details: str = "", action_type: str = "add") -> tuple[int, int, int]:
+    """Adds or removes employee IDs from the Nominated, Invited, and/or Joined fields for a given cohort.
     Updates Cohort Membership Details in participants.csv with nominated_by and notes information.
     Logs identifiers not found in employees.csv.
+    
+    Args:
+        action_type: Either "add" or "remove" to specify whether to add or remove employees from the selected statuses
     """
     if not cohort_name or not employee_ids_to_process or (not mark_nominated and not mark_invited and not mark_joined):
         return 0, 0, 0 # Nothing to do
@@ -786,7 +789,6 @@ def update_cohort_membership(cohort_name: str, employee_ids_to_process: list[str
     cohorts_df = load_table("cohorts")
     participants_df = load_table("participants") 
     employees_df = load_table("employees") 
-    # load_table.clear() # Clear after all reads, before writes, or at the very end.
 
     cohort_index_list = cohorts_df.index[cohorts_df["Name"] == cohort_name].tolist()
     if not cohort_index_list:
@@ -803,24 +805,41 @@ def update_cohort_membership(cohort_name: str, employee_ids_to_process: list[str
     if mark_nominated:
         current_cohort_nominees = set(str(cohorts_df.loc[cohort_idx, "Nominated"]).split(',') if cohorts_df.loc[cohort_idx, "Nominated"] else [])
         initial_len = len(current_cohort_nominees - {''})
-        current_cohort_nominees.update(employee_ids_to_process)
+        if action_type == "add":
+            current_cohort_nominees.update(employee_ids_to_process)
+        else: # remove
+            current_cohort_nominees = current_cohort_nominees - set(employee_ids_to_process)
         cohorts_df.loc[cohort_idx, "Nominated"] = ",".join(sorted(list(filter(None, current_cohort_nominees))))
-        added_nominees_count = len(set(filter(None, current_cohort_nominees))) - initial_len
-
+        if action_type == "add":
+            added_nominees_count = len(set(filter(None, current_cohort_nominees))) - initial_len
+        else:
+            added_nominees_count = initial_len - len(set(filter(None, current_cohort_nominees)))
 
     if mark_invited:
         current_cohort_invited = set(str(cohorts_df.loc[cohort_idx, "Invited"]).split(',') if cohorts_df.loc[cohort_idx, "Invited"] else [])
         initial_len_inv = len(current_cohort_invited - {''})
-        current_cohort_invited.update(employee_ids_to_process)
+        if action_type == "add":
+            current_cohort_invited.update(employee_ids_to_process)
+        else: # remove
+            current_cohort_invited = current_cohort_invited - set(employee_ids_to_process)
         cohorts_df.loc[cohort_idx, "Invited"] = ",".join(sorted(list(filter(None, current_cohort_invited))))
-        added_invited_count = len(set(filter(None, current_cohort_invited))) - initial_len_inv
+        if action_type == "add":
+            added_invited_count = len(set(filter(None, current_cohort_invited))) - initial_len_inv
+        else:
+            added_invited_count = initial_len_inv - len(set(filter(None, current_cohort_invited)))
 
     if mark_joined:
         current_cohort_joined = set(str(cohorts_df.loc[cohort_idx, "Joined"]).split(',') if cohorts_df.loc[cohort_idx, "Joined"] else [])
         initial_len_join = len(current_cohort_joined - {''})
-        current_cohort_joined.update(employee_ids_to_process)
+        if action_type == "add":
+            current_cohort_joined.update(employee_ids_to_process)
+        else: # remove
+            current_cohort_joined = current_cohort_joined - set(employee_ids_to_process)
         cohorts_df.loc[cohort_idx, "Joined"] = ",".join(sorted(list(filter(None, current_cohort_joined))))
-        added_joined_count = len(set(filter(None, current_cohort_joined))) - initial_len_join
+        if action_type == "add":
+            added_joined_count = len(set(filter(None, current_cohort_joined))) - initial_len_join
+        else:
+            added_joined_count = initial_len_join - len(set(filter(None, current_cohort_joined)))
 
     # --- Update participants.csv ---
     participants_file_updated = False
@@ -832,33 +851,45 @@ def update_cohort_membership(cohort_name: str, employee_ids_to_process: list[str
         if not participant_indices.empty:
             participant_idx = participant_indices[0]
             participant_row_changed = False
-            action_taken_for_cohort = False # Renamed from action_taken_for_new_participant_cohort to avoid confusion
+            action_taken_for_cohort = False
 
             if mark_nominated:
                 emp_cohorts_nominated = set(str(participants_df.loc[participant_idx, "Cohorts Nominated"]).split(',') if participants_df.loc[participant_idx, "Cohorts Nominated"] else [])
-                if cohort_name not in emp_cohorts_nominated:
+                if action_type == "add" and cohort_name not in emp_cohorts_nominated:
                     emp_cohorts_nominated.add(cohort_name)
+                    participants_df.loc[participant_idx, "Cohorts Nominated"] = ",".join(sorted(list(filter(None, emp_cohorts_nominated))))
+                    participant_row_changed = True
+                elif action_type == "remove" and cohort_name in emp_cohorts_nominated:
+                    emp_cohorts_nominated.remove(cohort_name)
                     participants_df.loc[participant_idx, "Cohorts Nominated"] = ",".join(sorted(list(filter(None, emp_cohorts_nominated))))
                     participant_row_changed = True
                 action_taken_for_cohort = True 
             
             if mark_invited:
                 emp_cohorts_invited = set(str(participants_df.loc[participant_idx, "Cohorts Invited"]).split(',') if participants_df.loc[participant_idx, "Cohorts Invited"] else [])
-                if cohort_name not in emp_cohorts_invited:
+                if action_type == "add" and cohort_name not in emp_cohorts_invited:
                     emp_cohorts_invited.add(cohort_name)
+                    participants_df.loc[participant_idx, "Cohorts Invited"] = ",".join(sorted(list(filter(None, emp_cohorts_invited))))
+                    participant_row_changed = True
+                elif action_type == "remove" and cohort_name in emp_cohorts_invited:
+                    emp_cohorts_invited.remove(cohort_name)
                     participants_df.loc[participant_idx, "Cohorts Invited"] = ",".join(sorted(list(filter(None, emp_cohorts_invited))))
                     participant_row_changed = True
                 action_taken_for_cohort = True
 
             if mark_joined:
                 emp_cohorts_joined = set(str(participants_df.loc[participant_idx, "Cohorts Joined"]).split(',') if participants_df.loc[participant_idx, "Cohorts Joined"] else [])
-                if cohort_name not in emp_cohorts_joined:
+                if action_type == "add" and cohort_name not in emp_cohorts_joined:
                     emp_cohorts_joined.add(cohort_name)
+                    participants_df.loc[participant_idx, "Cohorts Joined"] = ",".join(sorted(list(filter(None, emp_cohorts_joined))))
+                    participant_row_changed = True
+                elif action_type == "remove" and cohort_name in emp_cohorts_joined:
+                    emp_cohorts_joined.remove(cohort_name)
                     participants_df.loc[participant_idx, "Cohorts Joined"] = ",".join(sorted(list(filter(None, emp_cohorts_joined))))
                     participant_row_changed = True
                 action_taken_for_cohort = True
             
-            if action_taken_for_cohort and nominated_by_details: # This implies a cohort action was taken
+            if action_taken_for_cohort and nominated_by_details and action_type == "add": # Only add nominated_by details when adding
                 nominated_by_list = [x.strip() for x in str(participants_df.loc[participant_idx, "Nominated By"]).split(",") if x.strip()]
                 if nominated_by_details not in nominated_by_list: # Only add if new
                     nominated_by_list.append(nominated_by_details)
@@ -866,75 +897,69 @@ def update_cohort_membership(cohort_name: str, employee_ids_to_process: list[str
                     participant_row_changed = True
             
             # Update notes if notes_details are provided and a cohort action was taken for this user
-            # This logic might need refinement: Do we append to existing notes, or overwrite?
-            # Current assumption: We are adding to the main "Notes" field, not cohort-specific notes.
-            # Let's assume for now 'notes_details' are cohort-specific and should update the participant's main 'Notes' field.
-            if action_taken_for_cohort and notes_details:
+            if action_taken_for_cohort and notes_details and action_type == "add": # Only add notes when adding
                 current_notes = str(participants_df.loc[participant_idx, "Notes"])
-                # Append raw notes_details, separated by newline if needed
                 if notes_details not in current_notes:
                     updated_notes = f"{current_notes}\n{notes_details}".strip() if current_notes else notes_details
                     participants_df.loc[participant_idx, "Notes"] = updated_notes
                     participant_row_changed = True
 
-
             if participant_row_changed:
                 participants_df.loc[participant_idx, "Last Updated"] = current_time
                 participants_file_updated = True
         else:
-            # Participant does not exist, create a new entry
-            emp_details = employees_df[employees_df["Standard ID"] == emp_id] # Will be empty for absent IDs
-            
-            email_for_new_participant = ""
-            if "@" in emp_id: # If the emp_id itself is an email
-                email_for_new_participant = emp_id
-            elif not emp_details.empty: # It's a valid ID found in employees_df
-                 email_for_new_participant = emp_details["Email"].iloc[0]
-            # If emp_id is a non-email ID not found in employees_df, email_for_new_participant remains ""
+            # Only create new participant entries when adding, not when removing
+            if action_type == "add":
+                emp_details = employees_df[employees_df["Standard ID"] == emp_id]
+                
+                email_for_new_participant = ""
+                if "@" in emp_id:
+                    email_for_new_participant = emp_id
+                elif not emp_details.empty:
+                    email_for_new_participant = emp_details["Email"].iloc[0]
 
-            new_row_data = {col: "" for col in participants_df.columns}
-            new_row_data["Standard ID"] = emp_id
-            new_row_data["Email"] = email_for_new_participant
-            if "Waitlist" in new_row_data: new_row_data["Waitlist"] = "No" # Default for new entries
-            
-            temp_emp_cohorts_nominated = set()
-            temp_emp_cohorts_invited = set()
-            temp_emp_cohorts_joined = set()
-            temp_nominated_by_list = []
-            temp_notes = ""
+                new_row_data = {col: "" for col in participants_df.columns}
+                new_row_data["Standard ID"] = emp_id
+                new_row_data["Email"] = email_for_new_participant
+                if "Waitlist" in new_row_data: new_row_data["Waitlist"] = "No"
+                
+                temp_emp_cohorts_nominated = set()
+                temp_emp_cohorts_invited = set()
+                temp_emp_cohorts_joined = set()
+                temp_nominated_by_list = []
+                temp_notes = ""
 
-            action_taken_for_new_participant_cohort = False
-            if mark_nominated:
-                temp_emp_cohorts_nominated.add(cohort_name)
-                action_taken_for_new_participant_cohort = True
-            if mark_invited:
-                temp_emp_cohorts_invited.add(cohort_name)
-                action_taken_for_new_participant_cohort = True
-            if mark_joined:
-                temp_emp_cohorts_joined.add(cohort_name)
-                action_taken_for_new_participant_cohort = True
-            
-            if action_taken_for_new_participant_cohort and nominated_by_details:
-                temp_nominated_by_list.append(nominated_by_details)
-            
-            if action_taken_for_new_participant_cohort and notes_details:
-                temp_notes = notes_details
+                action_taken_for_new_participant_cohort = False
+                if mark_nominated:
+                    temp_emp_cohorts_nominated.add(cohort_name)
+                    action_taken_for_new_participant_cohort = True
+                if mark_invited:
+                    temp_emp_cohorts_invited.add(cohort_name)
+                    action_taken_for_new_participant_cohort = True
+                if mark_joined:
+                    temp_emp_cohorts_joined.add(cohort_name)
+                    action_taken_for_new_participant_cohort = True
+                
+                if action_taken_for_new_participant_cohort and nominated_by_details:
+                    temp_nominated_by_list.append(nominated_by_details)
+                
+                if action_taken_for_new_participant_cohort and notes_details:
+                    temp_notes = notes_details
 
-
-            new_row_data["Cohorts Nominated"] = ",".join(sorted(list(filter(None, temp_emp_cohorts_nominated))))
-            new_row_data["Cohorts Invited"] = ",".join(sorted(list(filter(None, temp_emp_cohorts_invited))))
-            new_row_data["Cohorts Joined"] = ",".join(sorted(list(filter(None, temp_emp_cohorts_joined))))
-            new_row_data["Nominated By"] = ", ".join(sorted(list(filter(None, temp_nominated_by_list))))
-            new_row_data["Notes"] = temp_notes
-            new_row_data["Last Updated"] = current_time
-            
-            participants_df = pd.concat([participants_df, pd.DataFrame([new_row_data])], ignore_index=True)
-            
-            if emp_id in absent_ids_set:
-                st.info(f"Created new entry in participants.csv for unvalidated identifier {emp_id} while updating cohort '{cohort_name}'.")
-            else:
-                st.info(f"Created new entry in participants.csv for {emp_id} while updating cohort '{cohort_name}'.")
-            participants_file_updated = True
+                new_row_data["Cohorts Nominated"] = ",".join(sorted(list(filter(None, temp_emp_cohorts_nominated))))
+                new_row_data["Cohorts Invited"] = ",".join(sorted(list(filter(None, temp_emp_cohorts_invited))))
+                new_row_data["Cohorts Joined"] = ",".join(sorted(list(filter(None, temp_emp_cohorts_joined))))
+                new_row_data["Nominated By"] = ", ".join(sorted(list(filter(None, temp_nominated_by_list))))
+                new_row_data["Notes"] = temp_notes
+                new_row_data["Last Updated"] = current_time
+                
+                participants_df = pd.concat([participants_df, pd.DataFrame([new_row_data])], ignore_index=True)
+                
+                if emp_id in absent_ids_set:
+                    st.info(f"Created new entry in participants.csv for unvalidated identifier {emp_id} while updating cohort '{cohort_name}'.")
+                else:
+                    st.info(f"Created new entry in participants.csv for {emp_id} while updating cohort '{cohort_name}'.")
+                participants_file_updated = True
 
     save_table("cohorts", cohorts_df)
     if participants_file_updated:
@@ -1621,6 +1646,7 @@ else:
 
                 # Select Membership Type
                 st.markdown("#### Set Membership Status")
+                action_type = st.radio("Action", ["Add", "Remove"], key="cohort_membership_action")
                 mark_nominated_cohort = st.checkbox("Nominated")
                 mark_invited_cohort = st.checkbox("Invited")
                 mark_joined_cohort = st.checkbox("Joined")
@@ -1645,35 +1671,22 @@ else:
                         mark_invited_cohort,
                         mark_joined_cohort,
                         nominated_by_details=nominated_by_details_input,
-                        notes_details=notes_details_input
+                        notes_details=notes_details_input,
+                        action_type=action_type.lower()
                     )
                     success_msgs = []
-                    # Check if any action was intended by the user
-                    action_intended = mark_nominated_cohort or mark_invited_cohort or mark_joined_cohort
+                    action_verb = "Added" if action_type == "Add" else "Removed"
+                    if mark_nominated_cohort:
+                        success_msgs.append(f"{action_verb} {added_nom} employees from Nominated status")
+                    if mark_invited_cohort:
+                        success_msgs.append(f"{action_verb} {added_invited} employees from Invited status")
+                    if mark_joined_cohort:
+                        success_msgs.append(f"{action_verb} {added_joined} employees from Joined status")
                     
-                    if action_intended:
-                        if mark_nominated_cohort and added_nom > 0 : success_msgs.append(f"{added_nom} newly nominated.")
-                        elif mark_nominated_cohort: success_msgs.append("Nominations: No new additions.")
-
-                        if mark_invited_cohort and added_invited > 0 : success_msgs.append(f"{added_invited} newly invited.")
-                        elif mark_invited_cohort: success_msgs.append("Invitations: No new additions.")
-                        
-                        if mark_joined_cohort and added_joined > 0 : success_msgs.append(f"{added_joined} newly joined.")
-                        elif mark_joined_cohort: success_msgs.append("Joins: No new additions.")
-
-                        if (nominated_by_details_input or notes_details_input) and (added_nom > 0 or added_invited > 0 or added_joined > 0 or (len(employee_ids_for_cohort) > 0 and action_intended)):
-                            success_msgs.append("Participant details (Nominated By/Notes) updated where applicable.")
-                        
-                        if not success_msgs and action_intended: # If counts were 0 but actions were true
-                            success_msgs.append("No new additions to lists (employees may already be on them or details already current).")
-
                     if success_msgs:
-                        st.success(f"Successfully processed cohort '{selected_cohort_name}' for {len(employee_ids_for_cohort)} identifier(s). {' '.join(success_msgs)}")
-                        st.rerun()
-                    elif not action_intended:
-                        st.info("No membership actions (Nominated, Invited, Joined) were selected.")
-                    else: 
-                        st.info(f"No changes made to cohort '{selected_cohort_name}'. Employees may already be on the lists or details current.")
+                        st.success(" and ".join(success_msgs) + ".")
+                    else:
+                        st.info("No changes were made to cohort membership.")
 
     # Standard editor for other sections
     else:
