@@ -962,9 +962,13 @@ def update_cohort_membership(cohort_name: str, employee_ids_to_process: list[str
                     st.info(f"Created new entry in participants.csv for {emp_id} while updating cohort '{cohort_name}'.")
                 participants_file_updated = True
 
+    print(f"DEBUG: Saving cohorts.csv for cohort '{cohort_name}'")
     save_table("cohorts", cohorts_df)
     if participants_file_updated:
+        print(f"DEBUG: Saving participants.csv because participants_file_updated is True for cohort '{cohort_name}'")
         save_table("participants", participants_df)
+    else:
+        print(f"DEBUG: NOT saving participants.csv because participants_file_updated is False for cohort '{cohort_name}'")
     
     load_table.clear() 
     return added_nominees_count, added_invited_count, added_joined_count
@@ -1136,118 +1140,178 @@ if table_key == "manage_participation":
     # but still within `if table_key == "manage_participation"`
     with st.sidebar.expander("📝 Update Employee Event Status", expanded=True):
         st.markdown("### Update Event Status for Employee(s)")
+
+        # Form clearing logic: If trigger is set, clear related session state and reset trigger
+        if st.session_state.get("clear_event_status_form_now", False):
+            if "event_status_paste" in st.session_state: st.session_state.event_status_paste = ""
+            if "event_status_multiselect" in st.session_state: st.session_state.event_status_multiselect = []
+            # File uploader (event_status_upload) clears visually on rerun 
+            if "set_registered_event" in st.session_state: st.session_state.set_registered_event = False
+            if "set_participated_event" in st.session_state: st.session_state.set_participated_event = False
+            if "set_hosted_event" in st.session_state: st.session_state.set_hosted_event = False
+            
+            selected_event_display_key_for_clear = "selected_event_display_for_status_update"
+            # Safely get event options for resetting the selectbox
+            events_for_reset_options = load_table("events") 
+            event_options_for_clear = {}
+            if not events_for_reset_options.empty:
+                event_options_for_clear = {f"{r['Event ID']} - {r['Name']} ({pd.to_datetime(r['Date']).strftime('%Y-%m-%d') if pd.notna(r['Date']) else 'No Date'})": r['Event ID'] 
+                                           for _, r in events_for_reset_options.sort_values("Date", ascending=False).iterrows()}
+            
+            if event_options_for_clear and selected_event_display_key_for_clear in st.session_state:
+                 st.session_state[selected_event_display_key_for_clear] = list(event_options_for_clear.keys())[0]
+            elif selected_event_display_key_for_clear in st.session_state: # If no options but key exists, set to None or an appropriate empty state for selectbox
+                 st.session_state[selected_event_display_key_for_clear] = None 
+            
+            st.session_state.clear_event_status_form_now = False # Reset trigger
+            # CRITICAL: NO st.rerun() or load_table.clear() HERE in this block
         
-        if events_df.empty:
+        events_df_local = load_table("events") # Load once for this section for defining widgets
+        employees_df_local = load_table("employees") # Also ensure employees is loaded for the selector
+        participants_df_local = load_table("participants") # And participants for the warning
+
+        if events_df_local.empty:
             st.warning("No events found. Please add events in the 'Events' section first.")
-        elif employees_df.empty and participantes_df.empty: # Check if participants is also empty if relying on it
-             st.warning("No employees found in Employees table. Identifiers will be treated as new/unvalidated if not in existing Participants records.")
-        # Allow to proceed if employees_df is empty, as ui_components.employee_selector handles it.
-        
-        # else: # Original condition removed to allow processing if employees_df is empty
-        event_options = {f"{row['Event ID']} - {row['Name']} ({pd.to_datetime(row['Date']).strftime('%Y-%m-%d') if pd.notna(row['Date']) else 'No Date'})": row['Event ID']
-                            for _, row in events_df.sort_values("Date", ascending=False).iterrows()}
-        
-        selected_event_id = None 
-        if not event_options:
-                st.info("No events available to select.")
-        else:
-            selected_event_display = st.selectbox(
-            "Select Event",
-            options=list(event_options.keys())
-        )
-        selected_event_id = event_options.get(selected_event_display)
+        # This elif was checking participants_df.empty, but the main condition for showing the form is having events.
+        # The warning about employees can be shown if employees_df_local is empty but events exist.
+        # elif employees_df_local.empty and participants_df_local.empty: 
+        #      st.warning("No employees found in Employees table. Identifiers will be treated as new/unvalidated if not in existing Participants records.")
+        else: # This else block ensures the rest of the form renders if events_df_local is not empty
+            if employees_df_local.empty:
+                 st.warning("No employees found in Employees table. Any identifiers entered will be treated as new/unvalidated.")
 
-        st.divider()
-        st.markdown("#### Select Employees")
-        
-        all_event_employee_ids, absent_event_ids = ui_components.employee_selector(
-            employees_df, key_prefix="event_status"
-        )
+            event_options = {f"{row['Event ID']} - {row['Name']} ({pd.to_datetime(row['Date']).strftime('%Y-%m-%d') if pd.notna(row['Date']) else 'No Date'})": row['Event ID']
+                                for _, row in events_df_local.sort_values("Date", ascending=False).iterrows()}
+            
+            selected_event_id = None 
+            selected_event_display_key = "selected_event_display_for_status_update" 
+            
+            # Ensure event_options is not empty before trying to access its elements for session state init
+            if not event_options:
+                st.info("No events available to select from the loaded events data.") # More specific message
+                selected_event_display = None
+            else:
+                if selected_event_display_key not in st.session_state: 
+                    st.session_state[selected_event_display_key] = list(event_options.keys())[0]
+                
+                selected_event_display = st.selectbox(
+                    "Select Event",
+                    options=list(event_options.keys()),
+                    key=selected_event_display_key
+                )
+                if selected_event_display:
+                    selected_event_id = event_options.get(selected_event_display)
 
-        st.divider()
-        st.markdown("#### Set Status to Add")
-        set_registered = st.checkbox("Registered", key="set_registered_event")
-        set_participated = st.checkbox("Participated", key="set_participated_event")
-        set_hosted = st.checkbox("Hosted", key="set_hosted_event")
-
-
-        update_button_disabled = not (selected_event_id and all_event_employee_ids and (set_registered or set_participated or set_hosted)) 
-        
-        if st.button("Update Event Status", disabled=update_button_disabled, key="update_event_status_button_new_key_v2"):
-            st.write(f"Processing updates for {len(all_event_employee_ids)} identifier(s) for event {selected_event_id}: Adding Registered={set_registered}, Adding Participated={set_participated}, Adding Hosted={set_hosted}")
-
-            if absent_event_ids:
-                st.warning(f"Note: The following {len(absent_event_ids)} identifier(s) were not found in the main Employees table but will be processed and logged: {', '.join(absent_event_ids)}.")
-
-            newly_added_reg, newly_added_part, newly_added_host = update_employee_event_status(
-                all_event_employee_ids,
-                set(absent_event_ids), # Pass as set for efficient lookup
-                selected_event_id,
-                mark_registered=set_registered,
-                mark_participated=set_participated,
-                mark_hosted=set_hosted
+            st.divider()
+            st.markdown("#### Select Employees")
+            
+            all_event_employee_ids, absent_event_ids = ui_components.employee_selector(
+                employees_df_local, key_prefix="event_status" 
             )
-            
-            msg_parts = []
-            if set_registered and newly_added_reg > 0: msg_parts.append(f"{newly_added_reg} newly registered.")
-            elif set_registered: msg_parts.append(f"Registrations: No new additions (already registered or list unchanged).")
-            
-            if set_participated and newly_added_part > 0: msg_parts.append(f"{newly_added_part} newly participated.")
-            elif set_participated: msg_parts.append(f"Participation: No new additions (already participated or list unchanged).")
 
-            if set_hosted and newly_added_host > 0: msg_parts.append(f"{newly_added_host} newly marked as hosted.")
-            elif set_hosted: msg_parts.append(f"Hosted: No new additions (already marked as host or list unchanged).")
-            
-            if not msg_parts and not (set_registered or set_participated or set_hosted):
-                    msg_parts.append("No actions selected.")
-            elif not msg_parts: 
-                msg_parts.append("No new individuals were added to the selected lists (they may have already been on them).")
+            st.divider()
+            st.markdown("#### Set Status to Add")
+            set_registered = st.checkbox("Registered", key="set_registered_event")
+            set_participated = st.checkbox("Participated", key="set_participated_event")
+            set_hosted = st.checkbox("Hosted", key="set_hosted_event")
 
-            event_display_str = selected_event_display if selected_event_id and selected_event_display else "N/A" 
-            final_message = f"Event status update processed for {len(all_event_employee_ids)} identifier(s) for event '{event_display_str}'."
-            if msg_parts:
-                final_message += " Details: " + ' '.join(msg_parts)
-            else: 
-                final_message += " No specific actions were performed or needed." 
+            update_button_disabled = not (selected_event_id and all_event_employee_ids and (set_registered or set_participated or set_hosted)) 
             
-            st.success(final_message)
-            st.rerun()
+            if st.button("Update Event Status", disabled=update_button_disabled, key="update_event_status_button_final"):
+                st.write(f"Processing updates for {len(all_event_employee_ids)} identifier(s) for event {selected_event_id}: Adding Registered={st.session_state.set_registered_event}, Adding Participated={st.session_state.set_participated_event}, Adding Hosted={st.session_state.set_hosted_event}")
+
+                if absent_event_ids:
+                    st.warning(f"Note: The following {len(absent_event_ids)} identifier(s) were not found in the main Employees table but will be processed and logged: {', '.join(absent_event_ids)}.")
+
+                newly_added_reg, newly_added_part, newly_added_host = update_employee_event_status(
+                    all_event_employee_ids, 
+                    set(absent_event_ids),  
+                    selected_event_id,      
+                    mark_registered=st.session_state.set_registered_event,
+                    mark_participated=st.session_state.set_participated_event,
+                    mark_hosted=st.session_state.set_hosted_event
+                )
+                
+                msg_parts = []
+                if st.session_state.set_registered_event and newly_added_reg > 0: msg_parts.append(f"{newly_added_reg} newly registered")
+                elif st.session_state.set_registered_event: msg_parts.append(f"Registrations: No new additions")
+                
+                if st.session_state.set_participated_event and newly_added_part > 0: msg_parts.append(f"{newly_added_part} newly participated")
+                elif st.session_state.set_participated_event: msg_parts.append(f"Participation: No new additions")
+
+                if st.session_state.set_hosted_event and newly_added_host > 0: msg_parts.append(f"{newly_added_host} newly marked as hosted")
+                elif st.session_state.set_hosted_event: msg_parts.append(f"Hosted: No new additions")
+                
+                if not msg_parts and not (st.session_state.set_registered_event or st.session_state.set_participated_event or st.session_state.set_hosted_event):
+                    msg_parts.append("No actions selected")
+                elif not msg_parts: 
+                    msg_parts.append("No new individuals were added/updated")
+
+                event_display_name = selected_event_display if selected_event_id and selected_event_display else "N/A" 
+                final_message = f"Event status update processed for {len(all_event_employee_ids)} identifier(s) for event '{event_display_name}'."
+                if msg_parts:
+                    final_message += " Details: " + '; '.join(msg_parts) + "."
+                 
+                st.success(final_message)
+
+                st.session_state.clear_event_status_form_now = True # Set trigger to clear on next run
+                load_table.clear()
+                st.rerun()
 
     # New expander for bulk updating participant waitlist status and tags
     with st.sidebar.expander("📋 Update Participant Details", expanded=False):
         st.markdown("### Update Waitlist Status & Tags")
+
+        # Initialize form iteration counter if it doesn't exist
+        if "participant_details_form_iteration" not in st.session_state:
+            st.session_state.participant_details_form_iteration = 0
+
+        # REMOVED: Explicit form clearing logic based on 'clear_participant_details_form_now' trigger
         
-        # if employees_df.empty: # Allow to proceed even if employees_df is empty
-        #     st.warning("No employees found. Please add employees in the 'Employees' section first.")
-        # else:
+        current_form_iteration_key_pd = f"v{st.session_state.participant_details_form_iteration}"
+
+        employees_df_local_details = load_table("employees") 
+
         st.markdown("#### Select Employees")
+        # Use the iteration key in the key_prefix for the employee_selector
         bulk_employee_ids, absent_bulk_ids = ui_components.employee_selector(
-            employees_df, key_prefix="bulk_update"
+            employees_df_local_details, key_prefix=f"bulk_update_{current_form_iteration_key_pd}" 
         )
 
         st.divider()
 
         st.markdown("#### Set Details to Update")
 
+        # Add iteration key to other widgets if they need to be reset with the form
         waitlist_action = st.radio(
             "Update Waitlist Status:",
             ["No Change", "Add to Waitlist", "Remove from Waitlist"],
-            index=0,
-            key="waitlist_action"
+            index=0, 
+            key=f"waitlist_action_{current_form_iteration_key_pd}"
         )
         
         tags_to_add = st.text_input(
             "Add Tags (comma-separated):",
             help="These tags will be added to existing tags for each employee",
-            key="tags_to_add"
+            key=f"tags_to_add_{current_form_iteration_key_pd}"
         )
         
         st.divider()
         
         update_details_disabled = not (bulk_employee_ids and (waitlist_action != "No Change" or tags_to_add.strip()))
         
-        if st.button("Update Participant Details", disabled=update_details_disabled, key="update_participant_details_button_v2"):
-            participants_df_bulk = load_table("participants") # Renamed to avoid conflict
+        # The button's key itself doesn't need to change with iteration usually
+        if st.button("Update Participant Details", disabled=update_details_disabled, key="update_participant_details_button_final_v2"):
+            # Values for processing should be read from session state using the *current iteration keys*
+            current_waitlist_action = st.session_state[f"waitlist_action_{current_form_iteration_key_pd}"]
+            current_tags_to_add = st.session_state[f"tags_to_add_{current_form_iteration_key_pd}"]
+            # bulk_employee_ids and absent_bulk_ids are direct returns from the component, reflecting its current state
+
+            print(f"DEBUG: Inside 'Update Participant Details' button logic.")
+            print(f"DEBUG: current_waitlist_action read from session state: '{current_waitlist_action}'")
+            print(f"DEBUG: current_tags_to_add read from session state: '{current_tags_to_add}'")
+
+            participants_df_bulk = load_table("participants") 
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             updates_made = 0
             waitlist_updates = 0
@@ -1265,7 +1329,7 @@ if table_key == "manage_participation":
                 participant_idx = -1
                 
                 if participant_indices.empty:
-                    emp_details = employees_df[employees_df["Standard ID"] == emp_id]
+                    emp_details = employees_df_local_details[employees_df_local_details["Standard ID"] == emp_id]
                     email_for_new_participant = ""
                     if "@" in emp_id:
                         email_for_new_participant = emp_id
@@ -1289,56 +1353,63 @@ if table_key == "manage_participation":
                 
                 row_updated = False
                 
-                if waitlist_action != "No Change":
-                    new_waitlist_status = "Yes" if waitlist_action == "Add to Waitlist" else "No"
-                    current_status = str(participants_df_bulk.loc[participant_idx, "Waitlist"]).strip().lower()
+                if current_waitlist_action != "No Change":
+                    # Ensure new_waitlist_status is lowercase for consistent comparison and saving
+                    new_waitlist_status = "yes" if current_waitlist_action == "Add to Waitlist" else "no"
+                    current_status_on_record = str(participants_df_bulk.loc[participant_idx, "Waitlist"]).strip().lower()
                     
-                    if (new_waitlist_status.lower() == "yes" and current_status != "yes") or \
-                        (new_waitlist_status.lower() == "no" and current_status == "yes"):
-                        participants_df_bulk.loc[participant_idx, "Waitlist"] = new_waitlist_status
+                    # Condition to update: 
+                    # 1. Trying to add to waitlist AND current status is not already 'yes'
+                    # 2. Trying to remove from waitlist AND current status is currently 'yes'
+                    if (new_waitlist_status == "yes" and current_status_on_record != "yes") or \
+                        (new_waitlist_status == "no" and current_status_on_record == "yes"):
+                        participants_df_bulk.loc[participant_idx, "Waitlist"] = new_waitlist_status # Save lowercase "yes" or "no"
                         row_updated = True
                         waitlist_updates += 1
                 
-                if tags_to_add.strip():
-                    current_tags = str(participants_df_bulk.loc[participant_idx, "Tags"])
-                    current_tag_list = [tag.strip() for tag in current_tags.split(",") if tag.strip()]
-                    new_tag_list = [tag.strip() for tag in tags_to_add.split(",") if tag.strip()]
+                if current_tags_to_add.strip():
+                    current_tags_on_record = str(participants_df_bulk.loc[participant_idx, "Tags"])
+                    current_tag_list_on_record = [tag.strip() for tag in current_tags_on_record.split(",") if tag.strip()]
+                    new_tags_to_add_list = [tag.strip() for tag in current_tags_to_add.split(",") if tag.strip()]
                     
                     added_tags_this_row = False
-                    for new_tag in new_tag_list:
-                        if new_tag not in current_tag_list:
-                            current_tag_list.append(new_tag)
+                    for new_tag in new_tags_to_add_list:
+                        if new_tag not in current_tag_list_on_record:
+                            current_tag_list_on_record.append(new_tag)
                             added_tags_this_row = True
                     
                     if added_tags_this_row:
-                        participants_df_bulk.loc[participant_idx, "Tags"] = ", ".join(sorted(list(filter(None, current_tag_list))))
+                        participants_df_bulk.loc[participant_idx, "Tags"] = ", ".join(sorted(list(filter(None, current_tag_list_on_record))))
                         row_updated = True
-                        tag_updates +=1 # Count updates per row where tags were actually added
+                        tag_updates +=1 
                 
                 if row_updated:
                     participants_df_bulk.loc[participant_idx, "Last Updated"] = current_time
                     updates_made += 1
             
             if updates_made > 0:
+                print(f"DEBUG: About to save participants table in Update Participant Details. Updates made: {updates_made}")
                 save_table("participants", participants_df_bulk)
+                print(f"DEBUG: Finished saving participants table in Update Participant Details.")
                 
                 success_msg_parts = []
-                if waitlist_action != "No Change" and waitlist_updates > 0 :
-                    status_text = "added to" if waitlist_action == "Add to Waitlist" else "removed from"
+                if current_waitlist_action != "No Change" and waitlist_updates > 0 :
+                    status_text = "added to" if current_waitlist_action == "Add to Waitlist" else "removed from"
                     success_msg_parts.append(f"{waitlist_updates} participant(s) {status_text} waitlist")
-                
-                if tags_to_add.strip() and tag_updates > 0: # tag_updates now counts rows where tags were added
+                if current_tags_to_add.strip() and tag_updates > 0: 
                     success_msg_parts.append(f"tags added/updated for {tag_updates} participant(s)")
-                
                 final_success_msg = f"Successfully processed details for {updates_made} participant(s)."
                 if success_msg_parts:
                     final_success_msg += " " + " and ".join(success_msg_parts) + "."
-
                 st.success(final_success_msg)
-                load_table.clear()
-                st.rerun()
             else:
-                st.info("No updates were needed. Participants may already have the specified waitlist status or tags.")
+                st.info("No updates were needed.")
+
+            # Increment form iteration counter to change widget keys on next run, causing reset
+            st.session_state.participant_details_form_iteration += 1
+            
+            load_table.clear()
+            st.rerun()
 
 # --- Other Sections (Employees, Workshops, Cohorts, Events) ---
 else:
@@ -1623,78 +1694,115 @@ else:
         # Manage Cohort Membership
         with st.sidebar.expander("👥 Manage Cohort Members", expanded=True):
             st.markdown("### Manage Cohort Membership")
-            if df.empty:
+
+            # Pre-fetch data needed for resetting selectbox if a reset is triggered
+            _cohort_options_for_reset_if_needed = {}
+            if st.session_state.get("clear_cohort_membership_form_now", False): 
+                _temp_cohorts_df_for_reset = load_table("cohorts") 
+                if not _temp_cohorts_df_for_reset.empty:
+                    _cohort_options_for_reset_if_needed = {r['Name']: r['Name'] for _, r in _temp_cohorts_df_for_reset.iterrows()}
+
+            if st.session_state.get("clear_cohort_membership_form_now", False):
+                if "cohort_mgmt_paste" in st.session_state: st.session_state.cohort_mgmt_paste = ""
+                if "cohort_mgmt_multiselect" in st.session_state: st.session_state.cohort_mgmt_multiselect = []
+                # cohort_mgmt_upload (file_uploader) clears visually on rerun
+                if "cohort_nominator_nominator_multiselect_tab" in st.session_state: st.session_state.cohort_nominator_nominator_multiselect_tab = []
+                if "cohort_nominator_nominator_paste_tab" in st.session_state: st.session_state.cohort_nominator_nominator_paste_tab = ""
+                if "cohort_membership_notes" in st.session_state: st.session_state.cohort_membership_notes = ""
+                if "mark_nominated_cohort_checkbox" in st.session_state: st.session_state.mark_nominated_cohort_checkbox = False
+                if "mark_invited_cohort_checkbox" in st.session_state: st.session_state.mark_invited_cohort_checkbox = False
+                if "mark_joined_cohort_checkbox" in st.session_state: st.session_state.mark_joined_cohort_checkbox = False
+                if "cohort_membership_action" in st.session_state: st.session_state.cohort_membership_action = "Add"
+                
+                selected_cohort_key_for_clear = "selected_cohort_name_for_mgmt"
+                if _cohort_options_for_reset_if_needed and selected_cohort_key_for_clear in st.session_state:
+                    st.session_state[selected_cohort_key_for_clear] = list(_cohort_options_for_reset_if_needed.keys())[0]
+                elif selected_cohort_key_for_clear in st.session_state: # If no options but key exists
+                     st.session_state[selected_cohort_key_for_clear] = None 
+                
+                st.session_state.clear_cohort_membership_form_now = False # Reset trigger
+                # NO st.rerun() or load_table.clear() in this block
+
+            cohorts_df_local = load_table("cohorts") 
+            employees_df_local_cohorts = load_table("employees") # Ensure employees is loaded
+
+            if cohorts_df_local.empty:
                 st.warning("No cohorts exist yet. Add a cohort first.")
-            elif employees_df.empty:
-                st.warning("No employees found. Please add employees in the 'Employees' section first.")
+            elif employees_df_local_cohorts.empty:
+                st.warning("No employees found in Employees table. Please add employees in the 'Employees' section first.")
             else:
-                # Cohort Selection
-                cohort_options = {row['Name']: row['Name'] for _, row in df.iterrows()}
-                selected_cohort_name = st.selectbox(
-                    "Select Cohort",
-                    options=list(cohort_options.keys())
-                )
+                cohort_options = {row['Name']: row['Name'] for _, row in cohorts_df_local.iterrows()}
+                selected_cohort_name_key = "selected_cohort_name_for_mgmt" 
+                if not cohort_options:
+                    selected_cohort_name = None 
+                    st.info("No cohorts available to select.")
+                else:
+                    if selected_cohort_name_key not in st.session_state:
+                        st.session_state[selected_cohort_name_key] = list(cohort_options.keys())[0]
+                    
+                    selected_cohort_name = st.selectbox(
+                        "Select Cohort",
+                        options=list(cohort_options.keys()),
+                        key=selected_cohort_name_key
+                    )
 
                 st.divider()
-
-                # Input Employee IDs/Emails
                 st.markdown("#### Select Employees")
                 employee_ids_for_cohort, absent_cohort_ids = ui_components.employee_selector(
-                    employees_df, key_prefix="cohort_mgmt"
+                    employees_df_local_cohorts, key_prefix="cohort_mgmt" 
                 )
 
                 st.divider()
-
-                # Select Membership Type
                 st.markdown("#### Set Membership Status")
-                action_type = st.radio("Action", ["Add", "Remove"], key="cohort_membership_action")
-                mark_nominated_cohort = st.checkbox("Nominated")
-                mark_invited_cohort = st.checkbox("Invited")
-                mark_joined_cohort = st.checkbox("Joined")
+                action_type = st.radio("Action", ["Add", "Remove"], key="cohort_membership_action", index=0) 
+                mark_nominated_cohort = st.checkbox("Nominated", key="mark_nominated_cohort_checkbox")
+                mark_invited_cohort = st.checkbox("Invited", key="mark_invited_cohort_checkbox")
+                mark_joined_cohort = st.checkbox("Joined", key="mark_joined_cohort_checkbox")
+
+                st.divider()
+                st.markdown("##### Nominated By") 
+                nominated_by_emails_list = ui_components.nominator_selector(
+                    employees_df_local_cohorts, key_prefix="cohort_nominator" 
+                )
+                notes_details_input_val = st.text_area("Notes", key="cohort_membership_notes")
 
                 st.divider()
                 
-                st.markdown("##### Nominated By") 
-                nominated_by_emails_list = ui_components.nominator_selector(
-                    employees_df, key_prefix="cohort_nominator"
-                )
-                nominated_by_details_input = ", ".join(nominated_by_emails_list)
-                if nominated_by_emails_list:
-                    st.caption(f"Nominators to be recorded: {nominated_by_details_input}")
+                update_cohort_button_disabled = (not selected_cohort_name or not employee_ids_for_cohort or \
+                                   (not mark_nominated_cohort and not mark_invited_cohort and not mark_joined_cohort))
 
-                notes_details_input = st.text_area("Notes")
+                if st.button("Update Cohort Membership", disabled=update_cohort_button_disabled, key="update_cohort_membership_button_final"):
+                    current_nominated_by_details = ", ".join(nominated_by_emails_list)
+                    current_notes_details = st.session_state.cohort_membership_notes 
 
-                st.divider()
-
-                # Update Button
-                if st.button("Update Cohort Membership", disabled=(not selected_cohort_name or not employee_ids_for_cohort or (not mark_nominated_cohort and not mark_invited_cohort and not mark_joined_cohort))):
                     if absent_cohort_ids:
                          st.warning(f"Note: The following {len(absent_cohort_ids)} identifier(s) were not found in the main Employees table but will be processed for cohort membership and logged: {', '.join(absent_cohort_ids)}.")
 
                     added_nom, added_invited, added_joined = update_cohort_membership(
-                        selected_cohort_name,
-                        employee_ids_for_cohort,
-                        set(absent_cohort_ids), # Pass as set for efficient lookup
-                        mark_nominated_cohort,
-                        mark_invited_cohort,
-                        mark_joined_cohort,
-                        nominated_by_details=nominated_by_details_input,
-                        notes_details=notes_details_input,
-                        action_type=action_type.lower()
+                        selected_cohort_name, 
+                        employee_ids_for_cohort, 
+                        set(absent_cohort_ids), 
+                        st.session_state.mark_nominated_cohort_checkbox,
+                        st.session_state.mark_invited_cohort_checkbox,
+                        st.session_state.mark_joined_cohort_checkbox,
+                        nominated_by_details=current_nominated_by_details,
+                        notes_details=current_notes_details,
+                        action_type=st.session_state.cohort_membership_action.lower()
                     )
                     success_msgs = []
-                    action_verb = "Added" if action_type == "Add" else "Removed"
-                    if mark_nominated_cohort:
-                        success_msgs.append(f"{action_verb} {added_nom} employees from Nominated status")
-                    if mark_invited_cohort:
-                        success_msgs.append(f"{action_verb} {added_invited} employees from Invited status")
-                    if mark_joined_cohort:
-                        success_msgs.append(f"{action_verb} {added_joined} employees from Joined status")
+                    current_action_verb = st.session_state.cohort_membership_action # "Add" or "Remove"
+                    if st.session_state.mark_nominated_cohort_checkbox: success_msgs.append(f"{current_action_verb}ed {added_nom} to/from Nominated")
+                    if st.session_state.mark_invited_cohort_checkbox: success_msgs.append(f"{current_action_verb}ed {added_invited} to/from Invited")
+                    if st.session_state.mark_joined_cohort_checkbox: success_msgs.append(f"{current_action_verb}ed {added_joined} to/from Joined")
                     
                     if success_msgs:
                         st.success(" and ".join(success_msgs) + ".")
                     else:
-                        st.info("No changes were made to cohort membership.")
+                        st.info("No changes were made (or no status selected).")
+
+                    st.session_state.clear_cohort_membership_form_now = True # Set trigger
+                    load_table.clear() 
+                    st.rerun()
 
     # Standard editor for other sections
     else:
