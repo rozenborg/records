@@ -191,8 +191,8 @@ def nominator_selector(employees_df: pd.DataFrame, *, key_prefix: str = "") -> L
     tab_select, tab_paste = st.tabs(["Select from Employee List", "Paste/Enter Emails Manually"])
 
     with tab_select:
-        if not employees_df.empty and "Email" in employees_df.columns and not employees_df["Email"].dropna().empty:
-            employee_email_options = sorted(list(employees_df["Email"].dropna().unique()))
+        if not employees_df.empty and "Work Email Address" in employees_df.columns and not employees_df["Work Email Address"].dropna().empty:
+            employee_email_options = sorted(list(employees_df["Work Email Address"].dropna().unique()))
             if employee_email_options: # Ensure there are actual emails to select
                 selected_emails_from_list = st.multiselect(
                     "Select Nominator(s) from Employee List",
