@@ -977,8 +977,8 @@ def update_cohort_membership(cohort_name: str, employee_ids_to_process: list[str
 ###############################################################################
 # Streamlit UI
 ###############################################################################
-st.set_page_config(page_title="Program Participation Tracker", layout="wide")
-st.title("Program Participation Tracker")
+st.set_page_config(page_title="Participation Tracker", layout="wide")
+st.title("Participation Tracker")
 
 ensure_data_dir()
 
@@ -1036,43 +1036,89 @@ with st.sidebar:
                     # ... existing event status update logic ...
                     pass
 
-        st.divider()
-        st.markdown("#### Update Participant Details")
-        # ... existing participant details update logic ...
-
     # Events section
     with st.expander("📅 Events", expanded=False):
-        with st.form("new_event_form"):
-            st.markdown("#### Add New Event")
-            event_name = st.text_input("Event Name")
-            event_date = st.date_input("Event Date")
-            event_category = st.selectbox("Category", options=list(EVENT_CATEGORIES.keys()), help="Select the type of event")
-            
-            workshop_df_form = load_table("workshops")
-            form_workshop_options = [f"{row['Workshop #']} - {row['Skill']}: {row['Goal']}" for _, row in workshop_df_form.iterrows()]
-            form_workshop_options.insert(0, "")
-            selected_workshop_display = st.selectbox("Workshop (if applicable)", options=form_workshop_options, help="Select the workshop this event is an instance of (if applicable)") if event_category == "Workshop" else ""
-            selected_workshop_id = selected_workshop_display.split(" - ")[0] if selected_workshop_display and " - " in selected_workshop_display else ""
-            
-            submitted = st.form_submit_button("Add Event")
-            if submitted:
-                # ... existing new event logic ...
-                pass
+        st.markdown("#### Add New Event")
+        event_name = st.text_input("Event Name")
+        event_date = st.date_input("Event Date")
+        event_category = st.selectbox("Category", options=list(EVENT_CATEGORIES.keys()), help="Select the type of event")
+        
+        workshop_df_form = load_table("workshops")
+        form_workshop_options = [f"{row['Workshop #']} - {row['Skill']}: {row['Goal']}" for _, row in workshop_df_form.iterrows()]
+        form_workshop_options.insert(0, "")
+        selected_workshop_display = st.selectbox("Workshop (if applicable)", options=form_workshop_options, help="Select the workshop this event is an instance of (if applicable)") if event_category == "Workshop" else ""
+        selected_workshop_id = selected_workshop_display.split(" - ")[0] if selected_workshop_display and " - " in selected_workshop_display else ""
+        
+        if st.button("Add Event", key="add_event_btn"):
+            # ... existing new event logic ...
+            pass
 
     # Cohorts section
     with st.expander("👥 Cohorts", expanded=False):
         st.markdown("#### Add New Cohort")
-        with st.form("new_cohort_form"):
-            cohort_name = st.text_input("Cohort Name")
-            cohort_date = st.date_input("Date Started")
-            submitted = st.form_submit_button("Add Cohort")
-            if submitted and cohort_name:
-                # ... existing new cohort logic ...
-                pass
+        cohort_name = st.text_input("Cohort Name")
+        cohort_date = st.date_input("Date Started")
+        if st.button("Add Cohort", key="add_cohort_btn"):
+            # ... existing new cohort logic ...
+            pass
 
         st.divider()
         st.markdown("#### Manage Cohort Members")
-        # ... existing cohort membership management logic ...
+        # --- Manage Cohort Membership ---
+        cohorts_df_local = load_table("cohorts")
+        employees_df_local_cohorts = load_table("employees")
+        if cohorts_df_local.empty:
+            st.warning("No cohorts exist yet. Add a cohort first.")
+        elif employees_df_local_cohorts.empty:
+            st.warning("No employees found in Employees table. Please add employees in the 'Employees' section first.")
+        else:
+            cohort_options = {row['Name']: row['Name'] for _, row in cohorts_df_local.iterrows()}
+            selected_cohort_name = st.selectbox(
+                "Select Cohort",
+                options=list(cohort_options.keys()),
+                key="selected_cohort_name_for_mgmt"
+            )
+            st.markdown("#### Select Employees")
+            employee_ids_for_cohort, absent_cohort_ids = ui_components.employee_selector(
+                employees_df_local_cohorts, key_prefix="cohort_mgmt"
+            )
+            st.markdown("#### Set Membership Status")
+            mark_nominated_cohort = st.checkbox("Nominated", key="mark_nominated_cohort_checkbox")
+            mark_invited_cohort = st.checkbox("Invited", key="mark_invited_cohort_checkbox")
+            mark_joined_cohort = st.checkbox("Joined", key="mark_joined_cohort_checkbox")
+            st.markdown("##### Nominated By")
+            nominated_by_emails_list = ui_components.nominator_selector(
+                employees_df_local_cohorts, key_prefix="cohort_nominator"
+            )
+            notes_details_input_val = st.text_area("Notes", key="cohort_membership_notes")
+            update_cohort_button_disabled = (not selected_cohort_name or not employee_ids_for_cohort or \
+                (not mark_nominated_cohort and not mark_invited_cohort and not mark_joined_cohort))
+            if st.button("Update Cohort Membership", disabled=update_cohort_button_disabled, key="update_cohort_membership_button_final"):
+                current_nominated_by_details = ", ".join(nominated_by_emails_list)
+                current_notes_details = notes_details_input_val
+                if absent_cohort_ids:
+                    st.warning(f"Note: The following {len(absent_cohort_ids)} identifier(s) were not found in the main Employees table but will be processed for cohort membership and logged: {', '.join(absent_cohort_ids)}.")
+                added_nom, added_invited, added_joined = update_cohort_membership(
+                    selected_cohort_name,
+                    employee_ids_for_cohort,
+                    set(absent_cohort_ids),
+                    mark_nominated_cohort,
+                    mark_invited_cohort,
+                    mark_joined_cohort,
+                    nominated_by_details=current_nominated_by_details,
+                    notes_details=current_notes_details,
+                    action_type="add"
+                )
+                success_msgs = []
+                if mark_nominated_cohort: success_msgs.append(f"Added {added_nom} to Nominated")
+                if mark_invited_cohort: success_msgs.append(f"Added {added_invited} to Invited")
+                if mark_joined_cohort: success_msgs.append(f"Added {added_joined} to Joined")
+                if success_msgs:
+                    st.success("; ".join(success_msgs) + ".")
+                else:
+                    st.info("No changes were made (or no status selected).")
+                load_table.clear()
+                st.rerun()
 
 # Main content area - Participants tab
 with main_tab1:
