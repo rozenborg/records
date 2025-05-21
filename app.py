@@ -977,8 +977,8 @@ def update_cohort_membership(cohort_name: str, employee_ids_to_process: list[str
 ###############################################################################
 # Streamlit UI
 ###############################################################################
-st.set_page_config(page_title="AI Adoption Program Tracker", layout="wide")
-st.title("AI Adoption Program Tracker")
+st.set_page_config(page_title="Program Participation Tracker", layout="wide")
+st.title("Program Participation Tracker")
 
 ensure_data_dir()
 

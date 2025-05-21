@@ -1,6 +1,6 @@
-# AI Adoption Program Tracker
+# Program Participation Tracker
 
-A Streamlit-based application to manage and track participation in an AI Adoption Program. This tool helps program administrators organize workshops, events, cohorts, and track employee participation.
+A Streamlit-based application to manage and track participation in various programs, workshops, and events. This tool helps program administrators organize workshops, events, cohorts, and track employee participation across different initiatives.
 
 ## Features
 
@@ -68,7 +68,7 @@ A Streamlit-based application to manage and track participation in an AI Adoptio
 - Ensure your CSV has `Standard ID` and `Work Email Address` columns.
 - Other columns from your CSV will be loaded automatically.
 - Use the sidebar options to toggle the display of these additional columns in the table.
-- Tag employees with special categories (e.g., Working Group Lead) if a "Categories" column is present in your CSV and selected for display.
+- Tag employees with special categories (e.g., Program Lead) if a "Categories" column is present in your CSV and selected for display.
 - View and edit employee data.
 
 ### Workshop Series Section
